@@ -1,0 +1,14 @@
+{
+  "name": "wakecycle",
+  "version": "0.0.1",
+  "description": "A batch orchestrator for AI coding agents that runs inside your existing agent session - no server, no daemon, no admin rights. (0.0.1 reserves the name; the harness ships here shortly.)",
+  "bin": { "wakecycle": "npm-bin/wakecycle.js" },
+  "keywords": ["agent", "orchestration", "ai", "harness", "batch", "claude"],
+  "author": "Andrew Stellman <andrew@stellman.com>",
+  "license": "Apache-2.0",
+  "homepage": "https://github.com/andrewstellman/wakecycle#readme",
+  "repository": { "type": "git", "url": "git+https://github.com/andrewstellman/wakecycle.git" },
+  "bugs": { "url": "https://github.com/andrewstellman/wakecycle/issues" },
+  "engines": { "node": ">=16" },
+  "files": ["npm-bin/", "README.md", "LICENSE"]
+}

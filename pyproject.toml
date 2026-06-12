@@ -1,0 +1,31 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "wakecycle"
+version = "0.0.1"
+description = "A batch orchestrator for AI coding agents that runs inside your existing agent session - no server, no daemon, no admin rights. (0.0.1 reserves the name; the harness ships here shortly.)"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "Apache-2.0" }
+authors = [{ name = "Andrew Stellman", email = "andrew@stellman.com" }]
+keywords = ["agent", "orchestration", "ai", "harness", "batch", "claude"]
+classifiers = [
+  "Development Status :: 2 - Pre-Alpha",
+  "License :: OSI Approved :: Apache Software License",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.10",
+  "Operating System :: OS Independent",
+  "Intended Audience :: Developers",
+]
+
+[project.urls]
+Homepage = "https://github.com/andrewstellman/wakecycle"
+Repository = "https://github.com/andrewstellman/wakecycle"
+
+[project.scripts]
+wakecycle = "wakecycle._reserve:main"
+
+[tool.setuptools]
+packages = ["wakecycle"]
