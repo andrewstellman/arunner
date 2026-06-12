@@ -62,6 +62,12 @@ pip install --user wakecycle      # Python 3.10+
 npm install wakecycle
 ```
 
+> **0.0.1 is a name reservation.** Installing today gives you the `wakecycle`
+> placeholder command; the harness itself runs from this repo via
+> `python3 bin/tick.py`, `python3 bin/ticker.py`, and `python3 bin/heartbeat.py`.
+> The `wakecycle` / `wakecycle-ticker` / `wakecycle-heartbeat` console commands
+> wire up at v0.1.0; the examples below use those names.
+
 The package ships an **example plan with cross-platform Python stub
 workers** — they do no real work and spend nothing; they just walk the
 heartbeat lifecycle so you watch the architecture happen (pool-limited
@@ -91,9 +97,11 @@ wakecycle-ticker path/to/demo-plan.json      # loop: tick -> spawn -> sleep -> r
 The ticker replaces the agent: each tick it runs the engine, spawns the
 listed workers detached, prints the table, sleeps the cadence, repeats —
 until every job is terminal. This path uses **detached shell workers**
-(`dispatch_mode: "shell"`); the demo ships a shell-dispatch variant of the
-plan for it, since the ticker runs shell entries only (a subagent entry is
-reported and skipped with the rung-1 instruction). (UC-5, FR-24)
+(`dispatch_mode: "shell"`). The ticker runs shell entries only (a subagent
+entry is reported and skipped with the rung-1 instruction), so point it at a
+shell-dispatch plan — adapt the example by switching `dispatch_mode` to
+`"shell"` and adding a `worker_cmd`, or use the shell demo plan shipped with
+v0.1.0. (UC-5, FR-24)
 
 > The demo runs in **~20 minutes** with the shipped example plan (UC-8); its
 > pace is set by the plan's `tick_interval_minutes` and the stub's `--steps`

@@ -43,6 +43,12 @@ pip install --user wakecycle      # Python 3.10+
 npm install wakecycle
 ```
 
+> **At 0.0.1 the package is a name reservation** — installing gives the
+> `wakecycle` placeholder command. Run the harness from this repo today with
+> `python3 bin/tick.py` / `bin/ticker.py` / `bin/heartbeat.py`; the
+> `wakecycle-ticker` / `wakecycle-heartbeat` console commands wire up at v0.1.0
+> (this manual uses those names).
+
 Nothing needs root. The only requirements are user-level Python 3.10+ and, if
 your workers are AI agents, a host CLI (Claude Code, Codex, Copilot, …) on
 PATH and authenticated.
