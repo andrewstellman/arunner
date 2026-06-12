@@ -18,20 +18,20 @@ Python 3.10+.
 
 | File (current path) | Role | When to read |
 |---|---|---|
-| `bin/qpb_harness_tick.py` | **The tick engine.** The whole state machine: `--init` scaffolds a run-dir; `<run-dir>` runs one idempotent tick and prints `{dispatch_list, status_table, next_tick_minutes, done, stop}`. | Before ANY change to run state, dispatch, stall/launch logic, the status table, or placeholders. This is the heart. |
-| `bin/harness_ticker.py` | **The ticker** — foreground/`--once` driver for cadence rungs 3–4 (the no-admin floor). Spawns shell workers detached, records PIDs, prints the table, sleeps/loops or exits. | When touching cadence below rung 1, detached spawning, or the printed-command floor (FR-25). |
-| `bin/harness_heartbeat.py` | **The heartbeat helper** — the optional convenience SDK workers use to append v2 (`label`/`data`) heartbeat lines (`emit`/`keepalive`/`terminal`). Payload-agnostic, stdlib, the part that defines the worker contract. | When touching the heartbeat line format, the helper CLI, or E6 (loud write-failure). |
-| `bin/harness_demo_worker.py` | **The demo stub worker** — cross-platform, zero-API; walks the heartbeat lifecycle so the example plan runs identically everywhere (UC-8). | When touching the demo, or as the reference for "what a conformant worker does." |
+| `bin/tick.py` | **The tick engine.** The whole state machine: `--init` scaffolds a run-dir; `<run-dir>` runs one idempotent tick and prints `{dispatch_list, status_table, next_tick_minutes, done, stop}`. | Before ANY change to run state, dispatch, stall/launch logic, the status table, or placeholders. This is the heart. |
+| `bin/ticker.py` | **The ticker** — foreground/`--once` driver for cadence rungs 3–4 (the no-admin floor). Spawns shell workers detached, records PIDs, prints the table, sleeps/loops or exits. | When touching cadence below rung 1, detached spawning, or the printed-command floor (FR-25). |
+| `bin/heartbeat.py` | **The heartbeat helper** — the optional convenience SDK workers use to append v2 (`label`/`data`) heartbeat lines (`emit`/`keepalive`/`terminal`). Payload-agnostic, stdlib, the part that defines the worker contract. | When touching the heartbeat line format, the helper CLI, or E6 (loud write-failure). |
+| `bin/demo_worker.py` | **The demo stub worker** — cross-platform, zero-API; walks the heartbeat lifecycle so the example plan runs identically everywhere (UC-8). | When touching the demo, or as the reference for "what a conformant worker does." |
 | `SKILL.md` | The orchestrator agent's per-tick instructions (cadence rung 1) + the capability-ladder probe/announce/degrade prose + the worker contract. | When changing what the agent does per tick, or the ladder. |
 | `references/BOOTSTRAP_PROMPT.md` | The paste-once prompt that turns a fresh agent session into the orchestrator. Deliberately restates the per-tick sequence (carried a low-reasoning model to a clean pass). | When changing the operator's rung-1 entry experience. |
 | `references/STATE_MACHINE.md` | The canonical state-machine reference: states, transitions, idempotency, STOP/orphan semantics, shell dispatch, PID locks, E1/E2, schema v2, Postel, FR-21a/21b. | The companion to the engine — read alongside it. |
 | `schemas/*.json` | `plan`, `heartbeat`, `job_manifest`, `result` schemas. The heartbeat schema is the load-bearing cross-surface contract (worker emits / harness reads). | When changing any on-disk shape. Keep schema + code + tests in lockstep. |
 | `references/examples/` | The example plan (Python stub workers) — the ~minutes, zero-API demo. | When touching the demo or onboarding. |
-| `bin/tests/` | The suite: `test_qpb_harness_tick.py` (engine), `test_harness_heartbeat_generic_2b.py` (helper), `test_harness_ticker_2b.py` (ticker), `test_harness_schemas.py` (schema byte-identity), `test_harness_windows_readiness_2e.py` (cross-platform + ASCII sweeps). | Before and after every change. |
+| `tests/` | The suite: `test_tick.py` (engine), `test_heartbeat.py` (helper), `test_ticker.py` (ticker), `test_schemas.py` (schema byte-identity), `test_windows_readiness.py` (cross-platform + ASCII sweeps). | Before and after every change. |
 
-> At extraction the `qpb_`/`harness_` prefixes drop and these become the
-> `wakecycle` package's console entry points (`wakecycle`, `wakecycle-ticker`).
-> The roles above are stable; only the names change.
+> The `bin/` scripts are the wakecycle package's console entry points
+> (`wakecycle`, `wakecycle-ticker`, `wakecycle-heartbeat`); while developing,
+> run them directly as `python3 bin/<name>.py`.
 
 ## Load-bearing conventions (do not violate)
 
@@ -74,7 +74,7 @@ Python 3.10+.
 ## Running the suite
 
 ```bash
-python3 -m pytest bin/tests/ -q
+python3 -m pytest tests/ -q
 ```
 
 Run it before and after every change. Time-dependent transitions (stall,

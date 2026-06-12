@@ -1,8 +1,8 @@
-# Agent Harness — Requirements Document
+# Wakecycle — Requirements Document
 
-*Status: v1.0 DRAFT, 2026-06-11 (Cowork session). Consolidates every design decision from the v1.5.9 harness arc into one requirements document: the harness design docs, the capability-ladder decisions, the multi-host research, the edge-case register, and the empirical evidence from the validation runs. Product name TBD (operator decision, deadline: before first standalone publish) — this document says "the harness" throughout and renames with the product. Lives in QPB's `docs/design/` until extraction; travels to the standalone repo as its founding requirements doc.*
+*Status: v1.0 (consolidated from the v1.5.9 harness design arc: the design docs, the capability-ladder decisions, the multi-host research, the edge-case register, and the empirical validation runs). This is wakecycle's founding requirements document; the FR/NFR numbering is the stable reference for tests and docs.*
 
-*Sources of record: `QPB_v1.5.9_Design.md` Part 2 (decisions + capability ladder), `QPB_v1.5.9_Harness_Skill_Design.md` (architecture), `QPB_Harness_Multi_Host_Support_Research.md` (tiers, cross-platform, edge register), validation evidence in `spike/v1.5.9_phase_1A/spike-evidence.md` and the item-11/Haiku run records.*
+*Sources of record: the v1.5.9 design + multi-host research notes and the validation-run records from which this was consolidated.*
 
 ---
 
@@ -30,7 +30,7 @@ The harness was built as the Quality Playbook's test harness (replacing a ~10K-l
 
 ## 3. User stories
 
-1. As a QPB operator, I want to run quality audits across several repos overnight from one pasted prompt, so multi-repo benchmarking doesn't need my attention between start and finish.
+1. As an operator, I want to run quality audits across several repos overnight from one pasted prompt, so multi-repo benchmarking doesn't need my attention between start and finish.
 2. As an operator, I want to watch progress in a status table each tick, so I know what's running, queued, finished, or stalled without reading log files.
 3. As an operator, I want to halt a run by dropping a STOP file, so I never have to interrupt or kill an agent mid-thought.
 4. As an operator whose session crashed (or whose wakeup silently died), I want to resume by running one command against the existing run directory, so no work is lost and nothing double-runs.
@@ -177,7 +177,7 @@ The harness was built as the Quality Playbook's test harness (replacing a ~10K-l
 - FR-17: The orchestrating tier dispatches exactly what `dispatch_list` names — never more, never on its own initiative.
 
 **Heartbeat contract**
-- FR-18: Workers append single-line JSON records (`ts`, `task_id`, `schema_version`, `status` ∈ STARTING|IN_PROGRESS|COMPLETED|FAILED|ABANDONED, plus optional `label`, `message`, `data`) to their heartbeat file; terminal records carry `result_file` + `summary`. **`status` is the ONLY field the harness interprets** (it drives the state machine). `label` is a short free-form string displayed verbatim in the status table (column: ACTIVITY; truncated to width; ASCII-sanitized for display, raw preserved on disk) — this replaces the QPB-specific `phase`/`step` pair. `message` is longer human-facing detail. `data` is an opaque JSON object the harness never reads — the structure escape hatch and the A2A migration path. (QPB's vendored integration sets `label` from its own phase identity; that coupling never enters the generic core.)
+- FR-18: Workers append single-line JSON records (`ts`, `task_id`, `schema_version`, `status` ∈ STARTING|IN_PROGRESS|COMPLETED|FAILED|ABANDONED, plus optional `label`, `message`, `data`) to their heartbeat file; terminal records carry `result_file` + `summary`. **`status` is the ONLY field the harness interprets** (it drives the state machine). `label` is a short free-form string displayed verbatim in the status table (column: ACTIVITY; truncated to width; ASCII-sanitized for display, raw preserved on disk) — this replaces the older `phase`/`step` pair. `message` is longer human-facing detail. `data` is an opaque JSON object the harness never reads — the structure escape hatch and the A2A migration path. (a vendored integration may set `label` from its own identity; that coupling never enters the generic core.)
 - FR-19: A stdlib helper CLI performs all appends (`emit` / `keepalive` / `terminal`): JSON-encodes every value (no printf interpolation), opens with `O_APPEND`, one writer per run directory. The helper is optional — any conformant appender qualifies (Postel: the harness is liberal in what it accepts; malformed lines are skipped with a warning, never fatal).
 - FR-20: **Specifiable heartbeat file.** By default the harness assigns `{HEARTBEAT_PATH}` inside the run-dir; a plan entry MAY instead declare `heartbeat_path` (absolute) to point the harness at a file the job already writes — supporting pre-existing tools/jobs with their own status-file location, with no change to the job. The run-dir result/manifest layout is unaffected.
 - FR-21: If a heartbeat cannot be written, the helper exits nonzero loudly and worker guidance is to abort with FAILED (E6) — a silent worker must never look healthy.
@@ -198,10 +198,10 @@ The harness was built as the Quality Playbook's test harness (replacing a ~10K-l
 - FR-29: Pre-flight warns when the run-dir path looks like a synced folder (OneDrive/Dropbox patterns) (E4).
 
 **Distribution**
-- FR-30: Shipped as a standalone repo (canonical upstream) + pip and npm packages installable user-level; QPB carries a vendored copy with a lineage note and a drift test pinned to an upstream release.
+- FR-30: Shipped as a standalone repo (canonical upstream) + pip and npm packages installable user-level; a downstream consumer may carry a vendored copy with a lineage note and a drift test pinned to an upstream release.
 - FR-31: The package includes the example plan with cross-platform Python stub workers — the ~20-minute zero-API-spend demo (UC-8) — runnable at rung 1 or rung 3.
-- FR-32: The plugin layout (plugin.json + marketplace.json) qualifies for Claude-marketplace submission; both the harness and QPB plugins are submitted.
-- FR-33: Publishes are gated: clean-clone cold-build, built-artifact end-to-end test in a throwaway environment, dry-run before any live upload (QPB's publish-safety discipline verbatim).
+- FR-32: The plugin layout (plugin.json + marketplace.json) qualifies for Claude-marketplace submission; the harness plugin is submitted.
+- FR-33: Publishes are gated: clean-clone cold-build, built-artifact end-to-end test in a throwaway environment, dry-run before any live upload (the publish-safety discipline verbatim).
 
 ## 6. Nonfunctional requirements
 
@@ -229,7 +229,7 @@ The harness was built as the Quality Playbook's test harness (replacing a ~10K-l
 
 ## 8. Out of scope (this release)
 
-Kill semantics for in-flight workers on STOP (documented orphan behavior); per-phase stall thresholds; A2A/cross-machine transport (schemas are A2A-ready by carrying `task_id`/`schema_version`); full Codex/Cursor per-host validation matrices (v0.2); harness resume/iterate strategies (QPB v1.5.11 B-3); the silent-drop watchdog (`--max-quiet`) beyond the printed-command recovery; orchestrator-side telemetry/dashboards (the table and the disk are the UI).
+Kill semantics for in-flight workers on STOP (documented orphan behavior); per-phase stall thresholds; A2A/cross-machine transport (schemas are A2A-ready by carrying `task_id`/`schema_version`); full Codex/Cursor per-host validation matrices (v0.2); harness resume/iterate strategies (deferred); the silent-drop watchdog (`--max-quiet`) beyond the printed-command recovery; orchestrator-side telemetry/dashboards (the table and the disk are the UI).
 
 ## 9. Validation evidence map
 
@@ -247,4 +247,4 @@ Kill semantics for in-flight workers on STOP (documented orphan behavior); per-p
 
 ---
 
-*End of requirements v1.0 DRAFT. Maintained alongside the design docs; renames with the product. Functional/nonfunctional numbering is the stable reference for instructions, tests, and the eventual README.*
+*End of requirements v1.0 DRAFT. Functional/nonfunctional numbering is the stable reference for instructions, tests, and the eventual README.*

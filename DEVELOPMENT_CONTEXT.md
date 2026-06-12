@@ -50,7 +50,7 @@ All dates 2026:
    dispatch + PID locks, the concurrent-tick lockfile (E1) and wall-clock-jump
    guard (E2). Live no-admin-floor demo (2026-06-12).
 5. **Generalization (instruction 010).** Heartbeat schema v2 (`label`/`data`
-   replacing the QPB-specific `phase`/`step`), the mechanical `{HARNESS_BIN}`
+   replacing the older `phase`/`step` pair), the mechanical `{HARNESS_BIN}`
    placeholder closing the transcription hazard (FR-21a), the specifiable
    `heartbeat_path` (FR-20), the `LAUNCH-FAIL` diagnostics (FR-21b). This is
    what makes the core repo-independent and ready to extract.
@@ -110,7 +110,7 @@ in-session autonomous loop (rung 1) dropped 4 times in one session (gaps of
   related to the **#49747** issue family on scheduled-wakeup / resumed-turn
   reliability.
 - Full forensics with quoted transcript evidence:
-  `outputs/011-loop-drop-self-forensics.md` (in the QPB runner record).
+  the forensics record from the originating runner session.
 
 ### Lesser issues
 

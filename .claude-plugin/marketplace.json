@@ -1,0 +1,9 @@
+{
+  "$schema": "https://anthropic.com/claude-code/marketplace.schema.json",
+  "name": "wakecycle",
+  "description": "A batch orchestrator for AI coding agents that runs inside your existing agent session - no server, no daemon, no admin rights. A job is anything that appends JSON lines to a file.",
+  "owner": { "name": "Andrew Stellman", "email": "andrew@stellman.com" },
+  "plugins": [
+    { "name": "wakecycle", "source": "./plugins/wakecycle", "category": "productivity" }
+  ]
+}
