@@ -27,6 +27,7 @@ from pathlib import Path
 _HERE = Path(__file__).resolve().parent
 _ROOT = _HERE.parents[1]
 _TICKER = _ROOT / "bin" / "ticker.py"
+_ENGINE = _ROOT / "bin" / "tick.py"
 _STUB = _HERE / "stub_worker.py"
 _MAX_TICKS = 60
 
@@ -120,6 +121,17 @@ def run_scenario(scenario_dir, work_dir):
     runs_root = work_dir / "runs"
     runs_root.mkdir(parents=True, exist_ok=True)
     env = dict(os.environ, WAKECYCLE_RUNS_DIR=str(runs_root))
+
+    # FR-42: dogfood the pre-flight -- a malformed scenario plan must fail
+    # loudly HERE, not produce a confusing run. (target_repo is {SCENARIO_DIR},
+    # an existing dir; worker_cmd carries {HEARTBEAT_PATH} -- valid scenarios
+    # pass.)
+    chk = subprocess.run([sys.executable, str(_ENGINE), "--check", str(plan_path)],
+                         env=env, stdout=subprocess.PIPE,
+                         stderr=subprocess.DEVNULL, timeout=60)
+    if chk.returncode != 0:
+        raise RuntimeError("scenario plan failed --check:\n%s"
+                           % chk.stdout.decode("utf-8", "replace"))
 
     control = scn.get("control") or {}
     stop_after = control.get("write_stop_after_tick")

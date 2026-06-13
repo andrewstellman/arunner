@@ -52,6 +52,23 @@ class IntegrationScenarioTests(unittest.TestCase):
                 self.assertEqual(failures, [],
                                  "scenario %s failed: %s" % (sc.name, failures))
 
+    def test_harness_rejects_malformed_plan_via_check(self):
+        # FR-42 dogfood: a scenario whose plan is malformed (bad dispatch_mode)
+        # must fail loudly at --check on load, not produce a confusing run.
+        with tempfile.TemporaryDirectory() as d:
+            sc = Path(d) / "bad_scenario"
+            sc.mkdir()
+            (sc / "scenario.json").write_text(json.dumps({
+                "plan": {"pool_size": 1, "entries": [
+                    {"task_id": "t", "target_repo": "{SCENARIO_DIR}",
+                     "dispatch_mode": "bogus",          # invalid enum
+                     "worker_prompt": "x"}]},
+                "expected": {}}))
+            with self.assertRaises(RuntimeError) as cm:
+                RUNNER.run_scenario(sc, d)
+            self.assertIn("--check", str(cm.exception))
+            self.assertIn("dispatch_mode", str(cm.exception))
+
     def test_checker_distinguishes_pass_from_fail(self):
         # Run a real scenario, then check it against a DELIBERATELY-WRONG
         # expected -- the checker must report failures (it can fail, not just

@@ -45,6 +45,7 @@ from __future__ import annotations
 
 import json
 import os
+import subprocess
 import sys
 import time
 import traceback
@@ -1074,6 +1075,128 @@ def _wakecycle_version() -> str:
     return "unknown"
 
 
+# --- FR-42 plan pre-flight (--check) ----------------------------------------
+# A hand-rolled, stdlib-only validator (NFR-3 forbids a jsonschema dependency).
+# It reports ALL problems at once so an adopter fixes config proactively rather
+# than discovering it as a reactive AUTH_OR_LAUNCH_FAILED after launch spend.
+
+_VALID_DISPATCH_MODES = ("subagent", "shell")
+# Top-level optional knobs that, IF present, must be integers >= 1 (mirrors
+# plan.schema.json minimums; defaults live in the engine if omitted).
+_PLAN_INT_KEYS = ("tick_interval_minutes", "pool_size", "stall_threshold_minutes",
+                  "launch_grace_minutes", "idle_tick_multiplier")
+# Reuse the engine's substitution sets so the check can NEVER drift from what
+# _dispatch actually substitutes (FR-42). _KNOWN_PLACEHOLDERS catches typos like
+# {HEARTBEATPATH}; the subagent prompt must carry the full _PLACEHOLDERS block.
+_KNOWN_PLACEHOLDERS = frozenset(_SHELL_PLACEHOLDERS)
+_HEARTBEAT_PLACEHOLDER = "HEARTBEAT_PATH"   # the trackability-critical one
+assert _HEARTBEAT_PLACEHOLDER in _PLACEHOLDERS   # guard against a tuple rename
+_PLACEHOLDER_TOKEN_RE = __import__("re").compile(r"\{([A-Z][A-Z0-9_]*)\}")
+
+
+def _is_pos_int(v) -> bool:
+    return isinstance(v, int) and not isinstance(v, bool) and v >= 1
+
+
+def _run_auth_check(argv) -> tuple:
+    """Run an entry's auth_check argv (opt-in). Returns (rc, detail)."""
+    try:
+        proc = subprocess.run(argv, stdout=subprocess.DEVNULL,
+                               stderr=subprocess.DEVNULL, timeout=30)
+    except (OSError, subprocess.SubprocessError) as exc:
+        return 1, "could not run %r (%s)" % (argv, exc)
+    return proc.returncode, "rc=%d" % proc.returncode
+
+
+def _check_entry(i: int, e, run_auth: bool) -> list:
+    tag = "entries[%d]" % i
+    if not isinstance(e, dict):
+        return ["%s: must be a JSON object" % tag]
+    p = []
+    # required string fields
+    for key in ("task_id", "target_repo", "worker_prompt"):
+        if not (isinstance(e.get(key), str) and e.get(key)):
+            p.append("%s.%s: required non-empty string" % (tag, key))
+    mode = e.get("dispatch_mode")
+    if mode not in _VALID_DISPATCH_MODES:
+        p.append("%s.dispatch_mode: must be one of %s (got %r)"
+                 % (tag, list(_VALID_DISPATCH_MODES), mode))
+    # optional typed fields
+    if "heartbeat_path" in e and not isinstance(e["heartbeat_path"], str):
+        p.append("%s.heartbeat_path: must be a string" % tag)
+    for key in ("worker_cmd", "auth_check"):
+        if key in e and not (isinstance(e[key], list)
+                             and all(isinstance(t, str) for t in e[key])):
+            p.append("%s.%s: must be an array of strings" % (tag, key))
+    prompt = e.get("worker_prompt") if isinstance(e.get("worker_prompt"), str) else ""
+    cmd = e.get("worker_cmd") if isinstance(e.get("worker_cmd"), list) else []
+    cmd_text = " ".join(t for t in cmd if isinstance(t, str))
+    # placeholder presence -- reuse the engine tuples so it can't drift
+    if mode == "subagent":
+        for ph in _PLACEHOLDERS:
+            if ("{%s}" % ph) not in prompt:
+                p.append("%s.worker_prompt: missing placeholder {%s}" % (tag, ph))
+    elif mode == "shell":
+        if not cmd:
+            p.append("%s.worker_cmd: required (non-empty) for shell dispatch" % tag)
+        else:
+            hb = "{%s}" % _HEARTBEAT_PLACEHOLDER
+            via_cmd = hb in cmd_text
+            via_prompt = ("{PROMPT_FILE}" in cmd_text) and (hb in prompt)
+            if not (via_cmd or via_prompt):
+                p.append("%s: shell entry has no route for %s -- put it in "
+                         "worker_cmd, or reference {PROMPT_FILE} in worker_cmd "
+                         "with the prompt carrying it" % (tag, hb))
+    # typo / drift catch: any placeholder-shaped token that isn't a known one
+    for tok in sorted(set(_PLACEHOLDER_TOKEN_RE.findall(prompt + " " + cmd_text))):
+        if tok not in _KNOWN_PLACEHOLDERS:
+            p.append("%s: unknown placeholder {%s} (known: %s)"
+                     % (tag, tok, ", ".join(sorted(_KNOWN_PLACEHOLDERS))))
+    # target_repo existence
+    tr = e.get("target_repo")
+    if isinstance(tr, str) and tr and not Path(tr).is_dir():
+        p.append("%s.target_repo: not an existing directory: %s" % (tag, tr))
+    # optional auth_check (opt-in: external commands only run with --run-auth)
+    if run_auth and mode == "shell" and isinstance(e.get("auth_check"), list) and e["auth_check"]:
+        rc, detail = _run_auth_check(e["auth_check"])
+        if rc != 0:
+            p.append("%s.auth_check: failed (%s)" % (tag, detail))
+    return p
+
+
+def check_plan(plan_path, run_auth: bool = False) -> list:
+    """Validate a plan and return a list of ALL problems (empty == clean).
+    Never launches anything (auth_check runs only when run_auth=True)."""
+    try:
+        plan = json.loads(Path(plan_path).read_text(encoding="utf-8"))
+    except OSError as exc:
+        return ["plan: cannot read %s (%s)" % (plan_path, exc)]
+    except ValueError as exc:
+        return ["plan: not valid JSON (%s)" % exc]
+    if not isinstance(plan, dict):
+        return ["plan: top level must be a JSON object"]
+    problems = []
+    for k in _PLAN_INT_KEYS:
+        if k in plan and not _is_pos_int(plan[k]):
+            problems.append("plan.%s: must be an integer >= 1 (got %r)" % (k, plan[k]))
+    if "schema_version" in plan and not isinstance(plan["schema_version"], str):
+        problems.append("plan.schema_version: must be a string")
+    entries = plan.get("entries")
+    if not isinstance(entries, list) or not entries:
+        problems.append("plan.entries: a non-empty array is required")
+        return problems                      # nothing per-entry to check
+    for i, e in enumerate(entries):
+        problems.extend(_check_entry(i, e, run_auth))
+    return problems
+
+
+def _format_check_report(plan_path, problems) -> str:
+    if not problems:
+        return "plan OK: %s -- no problems found" % plan_path
+    head = "plan FAILED: %s -- %d problem(s):" % (plan_path, len(problems))
+    return "\n".join([head] + ["  - " + p for p in problems])
+
+
 def main(argv) -> int:
     args = list(argv[1:])
     # FR-34 banner: the running version is always visible. To stderr so the
@@ -1082,6 +1205,17 @@ def main(argv) -> int:
     if not args or args in (["-h"], ["--help"]):
         _print_intro()
         return 0
+    if args and args[0] == "--check":
+        # FR-42: pre-flight validation. `--check <plan> [--run-auth]`.
+        rest = args[1:]
+        run_auth = "--run-auth" in rest
+        rest = [a for a in rest if a != "--run-auth"]
+        if len(rest) != 1:
+            print("usage: tick.py --check <plan> [--run-auth]", file=sys.stderr)
+            return 64
+        problems = check_plan(Path(rest[0]).resolve(), run_auth=run_auth)
+        print(_format_check_report(rest[0], problems))
+        return 1 if problems else 0
     if len(args) == 2 and args[0] == "--init":
         print(init_run(Path(args[1]).resolve()))
         return 0
