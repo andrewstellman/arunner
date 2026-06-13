@@ -71,6 +71,44 @@ def _kill_workers(run_dir: Path):
             pass
 
 
+def _heartbeat_terminal(run_dir, name):
+    """True once a run's worker has written a terminal heartbeat
+    (COMPLETED/FAILED/ABANDONED) -- substring match, the same liveness read
+    the engine uses."""
+    hb = Path(run_dir) / name / "heartbeat.ndjson"
+    try:
+        text = hb.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return False
+    return any(k in text for k in ("COMPLETED", "FAILED", "ABANDONED"))
+
+
+def _settle(run_dir, entries, timeout=20.0):
+    """Deterministic settle (FR-51): after a tick, WAIT until every in-flight,
+    NON-HELD worker has written its terminal heartbeat, so the next tick reaps
+    it without a wall-clock race against process-startup speed -- the
+    regression net must be environment-independent, not pass on a fast machine
+    and fail on a slow one. HELD workers (`--hold-file` in their worker_cmd)
+    never terminate and are EXCLUDED (the wait is conditional/bounded, not a
+    blanket sleep). On timeout we proceed (the tick handles whatever exists)."""
+    held = set()
+    for i, e in enumerate(entries, start=1):
+        if "--hold-file" in (e.get("worker_cmd") or []):
+            held.add("run-%02d" % i)
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        status = _read_status(run_dir)
+        if status is None:
+            return
+        pending = [name for name, r in status.get("runs", {}).items()
+                   if name not in held
+                   and r.get("state") in ("claimed", "running")
+                   and not _heartbeat_terminal(run_dir, name)]
+        if not pending:
+            return
+        time.sleep(0.05)
+
+
 def run_scenario(scenario_dir, work_dir):
     scenario_dir = Path(scenario_dir)
     work_dir = Path(work_dir)
@@ -117,6 +155,14 @@ def run_scenario(scenario_dir, work_dir):
             pre_stop = copy.deepcopy(status)     # snapshot BEFORE the stop tick
             (run_dir / "STOP").touch()
             stopped = True
+
+        # Deterministic settle (FR-51): before the NEXT scripted tick reaps
+        # them, wait on disk truth for every dispatched non-held worker to
+        # write its terminal heartbeat -- so the regression net observes
+        # completion rather than racing a fixed tick budget against
+        # process-startup speed. Held-open workers are excluded (they never
+        # terminate). No-op when nothing is in-flight.
+        _settle(run_dir, plan.get("entries", []))
 
         if status.get("done"):
             break
