@@ -1,6 +1,6 @@
 {
   "name": "wakecycle",
-  "version": "0.0.1",
+  "version": "0.1.0",
   "description": "A batch orchestrator for AI coding agents that runs inside your existing agent session - no server, no daemon, no admin rights. (0.0.1 reserves the name; the harness ships here shortly.)",
   "bin": { "wakecycle": "npm-bin/wakecycle.js" },
   "keywords": ["agent", "orchestration", "ai", "harness", "batch", "claude"],

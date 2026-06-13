@@ -826,8 +826,25 @@ def _locked_skip_output(run_dir: Path) -> dict:
     }
 
 
+def _wakecycle_version() -> str:
+    """The single canonical version (FR-34): wakecycle/__init__.py:__version__.
+    bin scripts aren't installed as a package, so read it by repo-relative
+    path rather than importing -- one source, every surface reads it."""
+    init = Path(__file__).resolve().parent.parent / "wakecycle" / "__init__.py"
+    try:
+        for line in init.read_text(encoding="utf-8").splitlines():
+            if line.startswith("__version__"):
+                return line.split("=", 1)[1].strip().strip('"').strip("'")
+    except OSError:
+        pass
+    return "unknown"
+
+
 def main(argv) -> int:
     args = list(argv[1:])
+    # FR-34 banner: the running version is always visible. To stderr so the
+    # --init run-dir path and the per-tick JSON stay clean on stdout.
+    print("wakecycle %s" % _wakecycle_version(), file=sys.stderr)
     if not args or args in (["-h"], ["--help"]):
         _print_intro()
         return 0

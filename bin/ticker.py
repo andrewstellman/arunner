@@ -276,6 +276,9 @@ def main(argv=None) -> int:
     args = ap.parse_args(list(sys.argv[1:] if argv is None else argv))
 
     engine = _load_engine()
+    # FR-34 banner (to stderr so the status table stays clean on stdout); the
+    # ticker reuses the engine's single-source version reader.
+    print("wakecycle %s" % engine._wakecycle_version(), file=sys.stderr)
     run_dir = _resolve_run_dir(engine, args.target)
     _warn_synced_folder(run_dir)
     auth_cache: dict = {}

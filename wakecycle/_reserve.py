@@ -1,4 +1,4 @@
-"""Pre-release reservation entry point (0.0.1).
+"""Pre-release reservation entry point (version from wakecycle.__version__).
 
 Prints a placeholder line so `wakecycle` / `wakecycle --version` is a valid
 installed command while the name is reserved on PyPI/npm. Intentionally
@@ -6,8 +6,10 @@ minimal and ASCII-safe; v0.1.0 wires the real tick engine + ticker."""
 from __future__ import annotations
 import sys
 
-_MSG = ("wakecycle 0.0.1 - pre-release placeholder; the agent harness ships "
-        "here shortly: https://github.com/andrewstellman/wakecycle")
+from wakecycle import __version__
+
+_MSG = (f"wakecycle {__version__} - pre-release placeholder; the agent harness "
+        f"ships here shortly: https://github.com/andrewstellman/wakecycle")
 
 
 def main(argv=None) -> int:

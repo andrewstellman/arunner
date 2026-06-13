@@ -1,7 +1,7 @@
 ---
 name: wakecycle
 description: Orchestrate AI coding agents (or any job that appends JSON lines to a file) across many repos or branches from one agent session. Drives a disk-backed state machine one idempotent tick at a time - each tick the tick script reads workers' heartbeats, advances the state machine, and lists which workers to dispatch; the orchestrator launches them, prints the status table, and schedules the next tick (via ScheduleWakeup at cadence rung 1, or the foreground ticker at lower rungs). Dispatch is in-session subagents (rung 1) or detached shell workers. Runs until every job is terminal or a STOP file appears. Use when asked to run a batch of agent jobs, a benchmark plan, or multi-repo reviews.
-version: 1.5.9
+version: 0.1.0
 license: Apache-2.0
 ---
 
@@ -42,8 +42,11 @@ selected, in one line to the operator:
 
 As a Claude Code session you run at **cadence 1 + dispatch 1**: you have
 `ScheduleWakeup` and a subagent tool, and your session persists across the
-workers' lifetime. Announce that: *"Harness: cadence rung 1 (ScheduleWakeup)
-+ dispatch rung 1 (subagent). Plan has N entries, pool P."* If the plan's
+workers' lifetime. Announce that, leading with the version banner (FR-34) —
+the running version is always visible: *"wakecycle <version> — Harness:
+cadence rung 1 (ScheduleWakeup) + dispatch rung 1 (subagent). Plan has N
+entries, pool P."* (the version is the one `bin/tick.py` printed to stderr;
+the canonical source is `wakecycle/__init__.py:__version__`). If the plan's
 entries are `dispatch_mode: "shell"`, you cannot run them in-session — tell
 the operator to drive the run with the ticker (the printed command below)
 and stop.

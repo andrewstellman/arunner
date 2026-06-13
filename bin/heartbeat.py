@@ -67,6 +67,16 @@ _TID_ENV = ("WAKECYCLE_TASK_ID", "HARNESS_TASK_ID")
 
 
 def _utc_iso() -> str:
+    # Clock seam (instr 018): mirror the tick engine's WAKECYCLE_NOW override
+    # (epoch float) so heartbeat timestamps -- and the future wrap-adapter
+    # keepalive cadence (Iteration 7) -- are unit-testable without sleeping.
+    override = os.environ.get("WAKECYCLE_NOW")
+    if override:
+        try:
+            return datetime.fromtimestamp(
+                float(override), timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        except (ValueError, OverflowError, OSError):
+            pass
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
