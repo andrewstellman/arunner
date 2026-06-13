@@ -95,6 +95,24 @@ def check(run_dir, expected):
                 fails.append("max next-cadence: expected %r, got %r (trace %r)"
                              % (expected["max_next_cadence"], max(cadences), cadences))
 
+    # 5c. shared-state safety (FR-39 CANCEL): named results records must be
+    # byte-identical before (snapshot taken just before CANCEL) vs after -- i.e.
+    # CANCEL touched ONLY its own target, not a genuine FAILED/COMPLETED record.
+    if expected.get("byte_identical_results"):
+        snap = meta.get("results_snapshot") or {}
+        for name in expected["byte_identical_results"]:
+            rp = os.path.join(run_dir, "results", name)
+            if not os.path.isfile(rp):
+                fails.append("byte_identical_results: %s missing after run" % name)
+            elif name not in snap:
+                fails.append("byte_identical_results: %s not in pre-CANCEL snapshot" % name)
+            else:
+                with open(rp, "rb") as fh:
+                    now_hex = fh.read().hex()
+                if now_hex != snap[name]:
+                    fails.append("CANCEL altered a foreign record %s "
+                                 "(not byte-identical across the cancel)" % name)
+
     # 6. STOP read-only: the stop tick changed NOTHING (not even cycle)
     if expected.get("stop_readonly"):
         pre = meta.get("pre_stop_status")

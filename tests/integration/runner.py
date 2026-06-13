@@ -130,12 +130,15 @@ def run_scenario(scenario_dir, work_dir):
     cadence_after = control.get("write_cadence_after_tick")
     cadence_value = control.get("cadence_value")
     pollnow_after = control.get("write_pollnow_after_tick")  # FR-38: one-shot
+    cancel_after = control.get("write_cancel_after_tick")    # FR-39: value-carrying
+    cancel_value = control.get("cancel_value")
     max_ticks = int(control.get("max_ticks", _MAX_TICKS))
 
     run_dir = None
     trace = []
     pre_stop = None
     stopped = False
+    results_snapshot = None       # FR-39: results/ bytes captured just before CANCEL
     for tick_no in range(1, max_ticks + 1):
         target = str(plan_path) if run_dir is None else str(run_dir)
         subprocess.run([sys.executable, str(_TICKER), "--once", target],
@@ -164,6 +167,14 @@ def run_scenario(scenario_dir, work_dir):
             (run_dir / "CADENCE").write_text(str(cadence_value), encoding="utf-8")
         if pollnow_after == tick_no:
             (run_dir / "POLL-NOW").touch()
+        if cancel_after == tick_no:
+            # Snapshot every results record NOW (after the prior tick reaped the
+            # genuine terminals, before CANCEL runs) so the checker can prove
+            # CANCEL leaves other runs' records byte-identical (shared-state).
+            results_snapshot = {p.name: p.read_bytes().hex()
+                                for p in sorted((run_dir / "results").iterdir())
+                                if p.is_file()}
+            (run_dir / "CANCEL").write_text(str(cancel_value), encoding="utf-8")
         if stop_after == tick_no:
             pre_stop = copy.deepcopy(status)     # snapshot BEFORE the stop tick
             (run_dir / "STOP").touch()
@@ -184,7 +195,7 @@ def run_scenario(scenario_dir, work_dir):
             break
 
     meta = {"tick_trace": trace, "pre_stop_status": pre_stop,
-            "stopped": stopped}
+            "stopped": stopped, "results_snapshot": results_snapshot}
     (run_dir / "_check_meta.json").write_text(json.dumps(meta), encoding="utf-8")
     _kill_workers(run_dir)
     return run_dir

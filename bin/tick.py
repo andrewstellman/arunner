@@ -546,12 +546,63 @@ def _ctl_poll_now(run_dir: Path, status: dict, warnings: list) -> None:
     _consume_control(run_dir, "POLL-NOW")
 
 
+_RUN_ID_RE = __import__("re").compile(r"^(?:run-)?0*([0-9]+)$", __import__("re").I)
+
+
+def _parse_run_id(raw):
+    """Normalize a CANCEL value to a canonical ``run-NN`` id, or None if
+    unparseable (Postel). Accepts ``run-02`` / ``run-2`` / a bare ``2``."""
+    if raw is None:
+        return None
+    m = _RUN_ID_RE.match(str(raw).strip())
+    if not m:
+        return None
+    return "run-%02d" % int(m.group(1))
+
+
+def _ctl_cancel(run_dir: Path, status: dict, warnings: list) -> None:
+    """FR-39: mark a named run ``abandoned`` (terminal) via the SAME synthesis
+    path the genuine FAILED reap uses (`_synthesize_failure`) -- so the run
+    stays auditable in results/ and frees its pool slot (it leaves
+    _INFLIGHT_STATES). One-shot + value-carrying (run id in the file body).
+
+    Safety (this is the load-bearing control):
+      * NEVER un-terminals a finished run -- an already-terminal target
+        (completed/failed/abandoned) is a consumed no-op with a warning. This
+        guard runs BEFORE _synthesize_failure, and _synthesize_failure's own
+        result_path early-return is a second layer (idempotent second CANCEL).
+      * Unknown run id / unparseable value -> consumed no-op, warned (Postel).
+      * The worker is NOT killed (§8): we free the slot and stop watching; a
+        detached orphan, if any, runs to its own terminal. Because the run is
+        already `abandoned` (terminal), a later orphan heartbeat does not
+        re-reap or resurrect it (_advance skips terminal states). So the true
+        running-process count may briefly exceed pool_size by design."""
+    raw = _read_control_value(run_dir, "CANCEL")
+    run_id = _parse_run_id(raw)
+    runs = status.get("runs", {})
+    if run_id is None:
+        warnings.append("CANCEL value %r unparseable (want a run id like "
+                        "'run-02'); ignored" % (raw,))
+    elif run_id not in runs:
+        warnings.append("CANCEL %s: unknown run; no-op" % run_id)
+    elif runs[run_id]["state"] in _TERMINAL_STATES:
+        warnings.append("CANCEL %s: already %s (terminal); no-op -- not "
+                        "un-terminaled" % (run_id, runs[run_id]["state"]))
+    else:
+        r = runs[run_id]
+        _synthesize_failure(run_dir, r, "abandoned",
+                            "cancelled by CANCEL control")
+        r["state"] = "abandoned"        # leaves _INFLIGHT_STATES -> frees a slot
+        _log(run_dir, "%s: ABANDONED (CANCEL control)" % run_id)
+    _consume_control(run_dir, "CANCEL")  # one-shot: always consumed
+
+
 # The handler registry IS the extension point: Iterations 3-5 register CANCEL /
 # CADENCE / POOL / POLL-NOW here without touching tick(). A name in
 # _CONTROL_ORDER with no handler is recognized-but-unhandled (left on disk).
 _CONTROL_HANDLERS = {"PAUSE": _ctl_pause, "RESUME": _ctl_resume,
                      "CADENCE": _ctl_cadence, "POOL": _ctl_pool,
-                     "POLL-NOW": _ctl_poll_now}
+                     "POLL-NOW": _ctl_poll_now, "CANCEL": _ctl_cancel}
 
 
 def _apply_controls(run_dir: Path, status: dict) -> list:

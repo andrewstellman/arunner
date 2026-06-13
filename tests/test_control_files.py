@@ -129,19 +129,27 @@ class PrecedenceAndExtensibilityTests(_Base):
                          ("CANCEL", "PAUSE", "RESUME", "CADENCE", "POOL", "POLL-NOW"))
         self.assertEqual(T._ALL_CONTROLS[0], "STOP")
 
-    def test_reserved_controls_recognized_but_unhandled(self):
-        # CANCEL is recognized (in the set) but has no handler yet (Iter 5) -- a
-        # present one must NOT crash or mis-fire. (CADENCE/POOL gained handlers
-        # in Iter 3, POLL-NOW in Iter 4 -- covered by their own tests.)
+    def test_all_controls_handled_and_unhandled_branch_still_safe(self):
+        # v0.1.0 is complete: every control in _CONTROL_ORDER now has a handler
+        # (CADENCE/POOL Iter 3, POLL-NOW Iter 4, CANCEL Iter 5).
+        for name in T._CONTROL_ORDER:
+            self.assertIn(name, T._CONTROL_HANDLERS, "%s has no handler" % name)
+        # The recognized-but-unhandled branch in _apply_controls is still there
+        # for a FUTURE reserved control: simulate one by removing a handler --
+        # the file is LEFT on disk, no crash, and it is NOT warned as "unknown"
+        # (it's a recognized name, just unhandled).
         rd = self._fresh(1, 1)
         (rd / "CANCEL").touch()
-        status = self._status(rd)
-        warnings = T._apply_controls(rd, status)          # must not raise
-        # the unhandled control is left on disk (not consumed, not acted on)
-        self.assertTrue((rd / "CANCEL").exists(), "CANCEL should be left for its iteration")
-        self.assertFalse(status.get("paused"))
-        # it is recognized, so it is NOT warned about as "unknown"
-        self.assertFalse(any("CANCEL" in w for w in warnings))
+        saved = dict(T._CONTROL_HANDLERS)
+        try:
+            del T._CONTROL_HANDLERS["CANCEL"]             # now reserved-but-unhandled
+            status = self._status(rd)
+            warnings = T._apply_controls(rd, status)      # must not raise
+            self.assertTrue((rd / "CANCEL").exists())     # left on disk, untouched
+            self.assertFalse(any("unknown" in w for w in warnings))
+        finally:
+            T._CONTROL_HANDLERS.clear()
+            T._CONTROL_HANDLERS.update(saved)
 
     def test_resume_wins_when_both_present(self):
         rd = self._fresh(1, 1)
