@@ -458,6 +458,39 @@ def _consume_control(run_dir: Path, name: str) -> None:
         pass
 
 
+def _read_control_value(run_dir: Path, name: str):
+    """The VALUE CHANNEL (FR-37): a value-carrying control (CADENCE/POOL, and
+    CANCEL in Iter 5) reads its argument from the control file's BODY -- e.g. a
+    `CADENCE` file containing `5`. Returns the stripped body, or None if the
+    file is unreadable/empty. Never raises (Postel)."""
+    try:
+        text = (run_dir / name).read_text(encoding="utf-8").strip()
+    except OSError:
+        return None
+    return text or None
+
+
+def _parse_positive_int(raw):
+    """Parse a control value as a positive integer, or None if missing,
+    unparseable, or non-positive (the caller warns + retains the prior)."""
+    try:
+        n = int(str(raw).strip())
+    except (TypeError, ValueError):
+        return None
+    return n if n > 0 else None
+
+
+def _effective_interval(status: dict, plan: dict) -> int:
+    """FR-37 cadence asymmetry: a CADENCE override LAYERS OVER the per-tick
+    plan re-read -- the override wins when present, else the plan value. This
+    is read both before controls (to honor a *persisted* override from an
+    earlier tick) and again after (in case CADENCE was set *this* tick)."""
+    override = status.get("tick_interval_override")
+    if isinstance(override, int) and override > 0:
+        return override
+    return _cfg(plan, "tick_interval_minutes", DEFAULT_TICK_INTERVAL_MINUTES)
+
+
 def _ctl_pause(run_dir: Path, status: dict, warnings: list) -> None:
     status["paused"] = True                      # sticky: persisted to status
     _consume_control(run_dir, "PAUSE")
@@ -468,10 +501,41 @@ def _ctl_resume(run_dir: Path, status: dict, warnings: list) -> None:
     _consume_control(run_dir, "RESUME")
 
 
+def _ctl_cadence(run_dir: Path, status: dict, warnings: list) -> None:
+    """FR-37: persist a tick-interval override that LAYERS OVER the plan
+    re-read (never edits plan.json). Non-positive/unparseable -> warn, retain
+    prior."""
+    raw = _read_control_value(run_dir, "CADENCE")
+    n = _parse_positive_int(raw)
+    if n is None:
+        warnings.append("CADENCE value %r invalid (want a positive integer of "
+                        "minutes); cadence unchanged" % (raw,))
+    else:
+        status["tick_interval_override"] = n     # sticky: layered in tick()
+    _consume_control(run_dir, "CADENCE")
+
+
+def _ctl_pool(run_dir: Path, status: dict, warnings: list) -> None:
+    """FR-37: write back the sticky `pool_size` (same field --init sets).
+    Raising it back-fills dispatch next tick (capped at the new pool); lowering
+    below the in-flight count is honored as slots drain -- dispatch is gated by
+    pool but reaping never is, so a running worker is NEVER killed.
+    Non-positive/unparseable -> warn, retain prior."""
+    raw = _read_control_value(run_dir, "POOL")
+    n = _parse_positive_int(raw)
+    if n is None:
+        warnings.append("POOL value %r invalid (want a positive integer); "
+                        "pool_size unchanged" % (raw,))
+    else:
+        status["pool_size"] = n
+    _consume_control(run_dir, "POOL")
+
+
 # The handler registry IS the extension point: Iterations 3-5 register CANCEL /
 # CADENCE / POOL / POLL-NOW here without touching tick(). A name in
 # _CONTROL_ORDER with no handler is recognized-but-unhandled (left on disk).
-_CONTROL_HANDLERS = {"PAUSE": _ctl_pause, "RESUME": _ctl_resume}
+_CONTROL_HANDLERS = {"PAUSE": _ctl_pause, "RESUME": _ctl_resume,
+                     "CADENCE": _ctl_cadence, "POOL": _ctl_pool}
 
 
 def _apply_controls(run_dir: Path, status: dict) -> list:
@@ -509,7 +573,7 @@ def tick(run_dir: Path) -> dict:
         r["_run_name"] = name  # transient, stripped before write
 
     pool_size = status.get("pool_size") or _cfg(plan, "pool_size", DEFAULT_POOL_SIZE)
-    tick_interval = _cfg(plan, "tick_interval_minutes", DEFAULT_TICK_INTERVAL_MINUTES)
+    tick_interval = _effective_interval(status, plan)  # honors a persisted CADENCE override
     stall_secs = _cfg(plan, "stall_threshold_minutes",
                       DEFAULT_STALL_THRESHOLD_MINUTES) * 60
     grace_secs = _cfg(plan, "launch_grace_minutes",
@@ -539,6 +603,13 @@ def tick(run_dir: Path) -> dict:
         for w in _apply_controls(run_dir, status):
             _log(run_dir, "CONTROL WARN: " + w)
         paused = bool(status.get("paused"))
+        # FR-37: CADENCE/POOL are the first VALUE-carrying controls -- their
+        # effect lives in fields tick() itself reads. Re-read after applying so
+        # THIS tick honors them: POOL back-fills dispatch up to the new pool;
+        # the CADENCE override governs next_tick_minutes. (PAUSE/RESUME needed
+        # no such wiring -- their `paused` effect already gated _dispatch.)
+        pool_size = status.get("pool_size") or pool_size
+        tick_interval = _effective_interval(status, plan)
         try:
             _advance(run_dir, runs, now, stall_secs, grace_secs, suppress_stall)
             if not paused:

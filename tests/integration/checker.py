@@ -61,17 +61,22 @@ def check(run_dir, expected):
         if got != st:
             fails.append("runs[%s].state: expected %r, got %r" % (run, st, got))
 
-    # 5. pool never exceeded (staggered dispatch) -- from the tick trace
-    if "max_inflight_le" in expected:
-        cap = expected["max_inflight_le"]
+    # 5. in-flight bounds -- from the tick trace. _le: pool never exceeded
+    # (staggered dispatch). _ge: in-flight REACHED at least N at some tick
+    # (e.g. a POOL raise back-filling dispatch up to the new pool, FR-37).
+    if "max_inflight_le" in expected or "max_inflight_ge" in expected:
         worst = 0
         for t in (meta.get("tick_trace") or []):
             c = t.get("counts", t)               # trace item carries {counts, paused}
             inflight = (c.get("claimed", 0) + c.get("running", 0)
                         + c.get("stalled", 0))
             worst = max(worst, inflight)
-        if worst > cap:
-            fails.append("max in-flight %d exceeded pool cap %d" % (worst, cap))
+        if "max_inflight_le" in expected and worst > expected["max_inflight_le"]:
+            fails.append("max in-flight %d exceeded pool cap %d"
+                         % (worst, expected["max_inflight_le"]))
+        if "max_inflight_ge" in expected and worst < expected["max_inflight_ge"]:
+            fails.append("max in-flight %d never reached expected %d"
+                         % (worst, expected["max_inflight_ge"]))
 
     # 6. STOP read-only: the stop tick changed NOTHING (not even cycle)
     if expected.get("stop_readonly"):

@@ -130,19 +130,20 @@ class PrecedenceAndExtensibilityTests(_Base):
         self.assertEqual(T._ALL_CONTROLS[0], "STOP")
 
     def test_reserved_controls_recognized_but_unhandled(self):
-        # CANCEL/CADENCE/POOL/POLL-NOW are recognized (in the set) but have no
-        # handler yet -- a present one must NOT crash or mis-fire.
+        # CANCEL/POLL-NOW are recognized (in the set) but have no handler yet
+        # (Iter 4/5) -- a present one must NOT crash or mis-fire. (CADENCE/POOL
+        # gained handlers in Iter 3 and are covered by the FR-37 tests.)
         rd = self._fresh(1, 1)
-        for name in ("CANCEL", "CADENCE", "POOL", "POLL-NOW"):
+        for name in ("CANCEL", "POLL-NOW"):
             (rd / name).touch()
         status = self._status(rd)
         warnings = T._apply_controls(rd, status)          # must not raise
         # unhandled controls are left on disk (not consumed, not acted on)
-        for name in ("CANCEL", "CADENCE", "POOL", "POLL-NOW"):
+        for name in ("CANCEL", "POLL-NOW"):
             self.assertTrue((rd / name).exists(), "%s should be left for its iteration" % name)
         self.assertFalse(status.get("paused"))
         # they are recognized, so they are NOT warned about as "unknown"
-        self.assertFalse(any("CANCEL" in w or "CADENCE" in w for w in warnings))
+        self.assertFalse(any("CANCEL" in w or "POLL-NOW" in w for w in warnings))
 
     def test_resume_wins_when_both_present(self):
         rd = self._fresh(1, 1)
