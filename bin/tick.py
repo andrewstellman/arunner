@@ -296,23 +296,40 @@ def _tail(hb: Path) -> list[str]:
             if ln.strip()]
 
 
+def _status_of_line(ln: str):
+    """The ``status`` FIELD of one heartbeat line (the ONLY field the harness
+    interprets, FR-18), JSON-parsed — NEVER a substring scan of the raw line.
+
+    This is load-bearing for the FR-40/41 adapters: they surface arbitrary
+    child output (a wrapped build that prints "FAILED", a tailed log line
+    containing "COMPLETED") as the display ``label``. A substring scan would
+    mistake that text for a terminal sentinel and mis-reap the run; reading the
+    status FIELD keeps doneness sourced from the worker's declared status only.
+    None for a malformed line (Postel: skipped) or one with no string status."""
+    try:
+        obj = json.loads(ln)
+    except (ValueError, TypeError):
+        return None
+    if isinstance(obj, dict):
+        st = obj.get("status")
+        return st if isinstance(st, str) else None
+    return None
+
+
 def _hb_observe(hb: Path):
     """Return (has_any, last_status_keyword, activity, mtime) for a
-    heartbeat file. Pure substring matching on the tail — no schema
-    validation here (the worker owns valid emission; the harness only reads
-    liveness keywords + the display label). last_status is the terminal/
-    progress keyword on the LAST non-empty line. ``activity`` is the v2
-    ``label`` of that line, falling back to the v1 ``phase`` (Postel: read
-    both) — it is display-only and never interpreted."""
+    heartbeat file. The status keyword is the ``status`` FIELD of the last
+    line (JSON-parsed, never substring-matched — so a display ``label`` that
+    happens to contain a sentinel word is never read as a status). ``activity``
+    is the v2 ``label`` of that line, falling back to the v1 ``phase`` (Postel:
+    read both) — display-only, never interpreted."""
     lines = _tail(hb)
     if not lines:
         return (False, None, None, None)
     last = lines[-1]
-    status = None
-    for kw in (*_TERMINAL_HB, "IN_PROGRESS", "STARTING"):
-        if kw in last:
-            status = kw
-            break
+    status = _status_of_line(last)
+    if status not in (*_TERMINAL_HB, "IN_PROGRESS", "STARTING"):
+        status = None
     activity = None
     if '"label":' in last or '"phase":' in last:
         try:
@@ -341,21 +358,23 @@ def _count_malformed(hb: Path) -> int:
 
 
 def _terminal_status_of(hb: Path):
-    """If any heartbeat line carries a terminal sentinel keyword, return it
+    """If any heartbeat line's STATUS FIELD is a terminal sentinel, return it
     (COMPLETED / FAILED / ABANDONED); else None. Scans the whole tail so a
-    terminal line followed by nothing is still caught."""
+    terminal line followed by nothing is still caught. Reads the status field
+    (not a substring) so an adapter's free-text label never mis-reaps a run."""
     for ln in _tail(hb):
-        for kw in _TERMINAL_HB:
-            if kw in ln:
-                return kw
+        st = _status_of_line(ln)
+        if st in _TERMINAL_HB:
+            return st
     return None
 
 
 def _result_meta(hb: Path) -> dict:
-    """Best-effort parse of the terminal sentinel line for result_file /
-    summary (display + results sidecar). Never raises."""
+    """Best-effort parse of the terminal sentinel line (located by its status
+    FIELD) for result_file / summary (display + results sidecar). Never
+    raises."""
     for ln in reversed(_tail(hb)):
-        if any(kw in ln for kw in _TERMINAL_HB):
+        if _status_of_line(ln) in _TERMINAL_HB:
             try:
                 obj = json.loads(ln)
                 return {"result_file": obj.get("result_file"),

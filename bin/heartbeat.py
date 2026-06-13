@@ -50,7 +50,9 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import subprocess
 import sys
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
@@ -233,6 +235,162 @@ def _cmd_terminal(args) -> int:
     return _append_or_die(hb, obj)
 
 
+# --- FR-40 wrap-and-run adapter ---------------------------------------------
+# `wrap` turns ANY command into a conformant wakecycle job with no change to
+# the command: it launches the command as its OWN CHILD (the adapter is the
+# parent), redirects the child's stdout+stderr to a capture file it owns and
+# tails, emits STARTING at launch, IN_PROGRESS keepalives on a TIMER-DRIVEN
+# floor (NOT output-driven, so a silent job never false-STALLs), and the
+# terminal COMPLETED/FAILED straight from the child's EXIT CODE (doneness is
+# exit-code-only, never parsed from output).
+
+_DEFAULT_LAUNCH_GRACE_MIN = 10
+_DEFAULT_STALL_THRESHOLD_MIN = 45
+
+
+def _now() -> float:
+    """Wall-clock epoch seconds, honoring the WAKECYCLE_NOW seam (instr 018) so
+    the keepalive cadence is unit-testable without real sleeps."""
+    override = os.environ.get("WAKECYCLE_NOW")
+    if override:
+        try:
+            return float(override)
+        except ValueError:
+            pass
+    return time.time()
+
+
+def _iso_from_epoch(epoch: float) -> str:
+    return datetime.fromtimestamp(epoch, timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def _last_output_line(capture_path: Path) -> Optional[str]:
+    """The most recent non-empty line of the child's captured output, or None.
+    errors='replace' (NFR-7: arbitrary external output)."""
+    try:
+        text = Path(capture_path).read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return None
+    for ln in reversed(text.splitlines()):
+        ln = ln.strip()
+        if ln:
+            return ln
+    return None
+
+
+def keepalive_interval_secs(launch_grace_secs: float, stall_secs: float) -> float:
+    """The keepalive floor (FR-40): a single interval that is BOTH within
+    launch_grace (first IN_PROGRESS lands before LAUNCH-FAIL) AND <= 1/3 of the
+    stall threshold (subsequent pings keep the heartbeat well under STALLED).
+    Never below 1s."""
+    return max(1.0, min(float(launch_grace_secs), float(stall_secs) / 3.0))
+
+
+class _Keepalive:
+    """Timer-driven IN_PROGRESS keepalive scheduler (FR-40).
+
+    The decision to emit is a PURE function of (now, last_emit, interval) -- it
+    does NOT depend on whether the child produced output, so a silent command
+    still keepalives on cadence and never false-STALLs. ``maybe_emit(now)`` is
+    the synchronous 'advance the clock to `now`, emit a keepalive if one is
+    due' entry point, so the cadence is deterministically testable by feeding
+    explicit clock values (no real sleeps)."""
+
+    def __init__(self, *, hb_path: Path, task_id: str, capture_path: Path,
+                 interval_secs: float, start_ts: float):
+        self.hb_path = hb_path
+        self.task_id = task_id
+        self.capture_path = capture_path
+        self.interval = max(1.0, float(interval_secs))
+        self.last_emit = float(start_ts)   # STARTING was emitted at start_ts
+        self.count = 0
+
+    def due(self, now: float) -> bool:
+        return (now - self.last_emit) >= self.interval
+
+    def maybe_emit(self, now: float) -> bool:
+        """Emit ONE IN_PROGRESS keepalive if due at ``now``. Returns True if it
+        emitted. Label = the child's most recent output line, or a neutral
+        fallback when the child has been quiet (the ping still fires)."""
+        if not self.due(now):
+            return False
+        label = _last_output_line(self.capture_path) or "(running, no output yet)"
+        append_line(self.hb_path, build_progress(
+            label=label, task_id=self.task_id, status="IN_PROGRESS",
+            ts=_iso_from_epoch(now)))
+        self.last_emit = now
+        self.count += 1
+        return True
+
+
+def _cmd_wrap(args) -> int:
+    hb, tid = _require_io(args)
+    cmd = list(getattr(args, "command", None) or [])
+    if cmd and cmd[0] == "--":              # argparse REMAINDER keeps the '--'
+        cmd = cmd[1:]
+    if not cmd:
+        print(f"{_NAME} wrap: no command given (use: wrap ... -- <cmd> [args])",
+              file=sys.stderr)
+        return 64
+    grace_secs = (args.launch_grace_minutes or _DEFAULT_LAUNCH_GRACE_MIN) * 60
+    stall_secs = (args.stall_threshold_minutes or _DEFAULT_STALL_THRESHOLD_MIN) * 60
+    interval = keepalive_interval_secs(grace_secs, stall_secs)
+    capture_path = (Path(args.capture_file) if args.capture_file
+                    else Path(hb).parent / "wrap.out")
+    try:
+        capture_path.parent.mkdir(parents=True, exist_ok=True)
+    except OSError as exc:
+        print(f"{_NAME} wrap: cannot create capture dir {capture_path.parent} "
+              f"({exc})", file=sys.stderr)
+        return 5
+
+    start = _now()
+    # STARTING immediately. If even this can't be written, fail loud (E6): an
+    # untrackable worker must never look healthy.
+    if _append_or_die(hb, build_progress(
+            label="wrap: %s" % " ".join(cmd), task_id=tid, status="STARTING",
+            ts=_iso_from_epoch(start))):
+        return 5
+
+    # The child writes to a FILE we own (never a PIPE) -- so a chatty child can
+    # never fill a pipe buffer and deadlock; we tail the file independently.
+    try:
+        cap = open(capture_path, "wb")
+    except OSError as exc:
+        print(f"{_NAME} wrap: cannot open capture file {capture_path} ({exc})",
+              file=sys.stderr)
+        return 5
+    try:
+        try:
+            proc = subprocess.Popen(cmd, stdout=cap, stderr=subprocess.STDOUT,
+                                    stdin=subprocess.DEVNULL)
+        except OSError as exc:
+            # The command itself couldn't launch -> FAILED terminal (the engine
+            # reaps it as failed rather than waiting out the launch grace).
+            append_line(hb, build_terminal(
+                task_id=tid, status="FAILED", result_file=str(capture_path),
+                summary="wrap: could not launch %r (%s)" % (cmd, exc)))
+            return 1
+        ka = _Keepalive(hb_path=Path(hb), task_id=tid, capture_path=capture_path,
+                        interval_secs=interval, start_ts=start)
+        while True:
+            try:
+                proc.wait(timeout=interval)
+                break                       # child exited
+            except subprocess.TimeoutExpired:
+                ka.maybe_emit(_now())       # timer-driven; fires even if silent
+    finally:
+        cap.close()
+
+    rc = proc.returncode
+    terminal = "COMPLETED" if rc == 0 else "FAILED"   # doneness = EXIT CODE only
+    if _append_or_die(hb, build_terminal(
+            task_id=tid, status=terminal, result_file=str(capture_path),
+            summary="wrap: %r exited %d" % (cmd[0], rc))):
+        return 5
+    return 0 if rc == 0 else 1              # adapter mirrors the child's status
+
+
 def _build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog=_NAME, description=__doc__.split("\n")[0])
     sub = p.add_subparsers(dest="cmd")
@@ -261,6 +419,19 @@ def _build_parser() -> argparse.ArgumentParser:
     tm.add_argument("--status", required=True, choices=list(_TERMINAL_STATES))
     tm.add_argument("--result-file", required=True)
     tm.add_argument("--summary", required=True)
+
+    wr = sub.add_parser("wrap", help="run a command as a child and emit its "
+                                     "heartbeat stream (FR-40)")
+    common(wr)
+    wr.add_argument("--launch-grace-minutes", type=int, default=None,
+                    help="first keepalive lands within this (default 10)")
+    wr.add_argument("--stall-threshold-minutes", type=int, default=None,
+                    help="keepalives fire at <= 1/3 of this (default 45)")
+    wr.add_argument("--capture-file", default=None,
+                    help="where to capture child stdout+stderr "
+                         "(default <heartbeat-dir>/wrap.out)")
+    wr.add_argument("command", nargs=argparse.REMAINDER,
+                    help="-- <command> [args...] to run")
     return p
 
 
@@ -277,6 +448,8 @@ def main(argv=None) -> int:
         return _cmd_keepalive(args)
     if args.cmd == "terminal":
         return _cmd_terminal(args)
+    if args.cmd == "wrap":
+        return _cmd_wrap(args)
     parser.print_help(sys.stderr)
     return 64
 

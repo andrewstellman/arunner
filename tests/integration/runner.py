@@ -73,15 +73,26 @@ def _kill_workers(run_dir: Path):
 
 
 def _heartbeat_terminal(run_dir, name):
-    """True once a run's worker has written a terminal heartbeat
-    (COMPLETED/FAILED/ABANDONED) -- substring match, the same liveness read
-    the engine uses."""
+    """True once a run's worker has written a terminal heartbeat -- detected by
+    the STATUS FIELD (JSON-parsed), mirroring the engine's _terminal_status_of.
+    Never a substring scan: an adapter's free-text label (a wrapped build that
+    prints 'FAILED') must not look terminal to the settle loop."""
     hb = Path(run_dir) / name / "heartbeat.ndjson"
     try:
         text = hb.read_text(encoding="utf-8", errors="replace")
     except OSError:
         return False
-    return any(k in text for k in ("COMPLETED", "FAILED", "ABANDONED"))
+    for ln in text.splitlines():
+        ln = ln.strip()
+        if not ln:
+            continue
+        try:
+            obj = json.loads(ln)
+        except ValueError:
+            continue
+        if isinstance(obj, dict) and obj.get("status") in ("COMPLETED", "FAILED", "ABANDONED"):
+            return True
+    return False
 
 
 def _settle(run_dir, entries, timeout=20.0):
@@ -115,6 +126,7 @@ def run_scenario(scenario_dir, work_dir):
     work_dir = Path(work_dir)
     scn = json.loads((scenario_dir / "scenario.json").read_text(encoding="utf-8"))
     plan = _substitute(scn["plan"], {"{STUB}": str(_STUB),
+                                     "{HEARTBEAT_BIN}": str(_ROOT / "bin" / "heartbeat.py"),
                                      "{SCENARIO_DIR}": str(scenario_dir)})
     plan_path = work_dir / "plan.json"
     plan_path.write_text(json.dumps(plan), encoding="utf-8")

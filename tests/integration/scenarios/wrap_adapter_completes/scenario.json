@@ -1,0 +1,36 @@
+{
+  "description": "FR-40 wrap adapter end-to-end: a shell entry whose worker_cmd is `heartbeat.py wrap -- <command>`. The adapter launches the command as its child, emits STARTING then the terminal COMPLETED from the child's exit 0, and the harness reaps it COMPLETED through the deterministic settle path (the adapter is a finite, non-held worker).",
+  "plan": {
+    "schema_version": "1",
+    "tick_interval_minutes": 1,
+    "pool_size": 1,
+    "stall_threshold_minutes": 45,
+    "launch_grace_minutes": 10,
+    "entries": [
+      {
+        "task_id": "wrap-1",
+        "target_repo": "{SCENARIO_DIR}",
+        "dispatch_mode": "shell",
+        "worker_prompt": "wrap demo (worker_cmd carries {HEARTBEAT_PATH})",
+        "worker_cmd": [
+          "python3", "{HEARTBEAT_BIN}", "wrap",
+          "--task-id", "{TASK_ID}",
+          "--heartbeat-path", "{HEARTBEAT_PATH}",
+          "--", "python3", "-c", "print('wrapped work done')"
+        ]
+      }
+    ]
+  },
+  "control": {
+    "max_ticks": 4
+  },
+  "expected": {
+    "done": true,
+    "run_states": {
+      "run-01": "completed"
+    },
+    "counts": {
+      "completed": 1
+    }
+  }
+}
