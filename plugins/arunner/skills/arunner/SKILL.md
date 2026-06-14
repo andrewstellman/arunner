@@ -152,6 +152,33 @@ The two silent wakeup-drops observed in the wild (2026-06-11) are exactly
 why the printed floor command exists — print it whenever you reschedule so
 the operator can always recover without re-finding this prompt.
 
+## Building a run interactively (FR-52)
+
+When the operator describes a batch in plain language ("run three jobs from
+ABC.md, DEF.md, GHI.md, pool 2, subagents"), **you** do the natural-language
+understanding and drive this loop — the tool embeds no model, it only provides
+deterministic plumbing (`expand` -> `--check` -> `preview` -> `run`). This is
+*designed* to work with any capable host agent, but only Claude Code has driven
+it end-to-end so far; treat multi-host builder support as DESIGNED, not proven —
+don't present it as verified on other hosts.
+
+1. **Describe -> assemble** a `jobs:` shorthand, choosing each job's dispatch by
+   the **intent precedence ladder** (per job): (i) explicit operator override;
+   (ii) target readable as instructions (`.md`/`.txt`/`.prompt`/inline) =>
+   `agent:"subagent"`, the file contents become the worker prompt; (iii) target
+   resolves to a runnable command => `adapter:"wrap"` with the full command;
+   (iv) ambiguous => **ask, never guess.** One list may mix modes.
+2. **Preview -> confirm:** run `python -m arunner preview <shorthand>` and show
+   the operator the per-job dispatch + source and the `--check` verdict. If
+   `--check` fails, do NOT offer to run — surface the errors. A confirmation is
+   valid only for the exact previewed plan.
+3. **Run:** `python -m arunner run <shorthand>`.
+4. **Persist on request:** `python -m arunner expand <shorthand> --save
+   my_run.json` (writes the `jobs:` source + the expanded `plan:`).
+5. **Incremental edit (pre-launch):** any change returns to unconfirmed —
+   re-preview, re-`--check`, fresh confirmation. (Live injection into a running
+   batch is the streaming queue, FR-47, not this.)
+
 ## In-context mode (dispatch-to-self, FR-46..49)
 
 In-context is the **third dispatch mode** (alongside subagent and shell),

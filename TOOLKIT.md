@@ -251,6 +251,58 @@ Ask, in order:
 The ticker runs **`shell` entries only** — a `subagent` entry it encounters
 is reported and skipped with the rung-1 instruction.
 
+## Interactive build — describe a run in plain language (FR-52)
+
+This is the headline UX: the operator describes a batch in plain language to the
+agent that has this skill loaded, and the agent **assembles → previews → runs →
+(optionally) saves** the session — no hand-written plan. **The tool embeds no
+model**: the *host agent* does the natural-language understanding and drives the
+procedure below; the tool provides only deterministic plumbing (expand → check →
+write → run + the `preview` verb). So this works with **any capable host
+agent** — but that breadth is **DESIGNED**: only Claude Code has driven it
+end-to-end so far. (V-14 verified Copilot/Codex as detached *workers*, not as
+builder-driving orchestrators.)
+
+**The 5-step loop the agent follows:**
+
+1. **Describe → assemble.** Turn the request into a `jobs:` shorthand, picking
+   each job's dispatch with the **intent precedence ladder** (per job, not per
+   request):
+   1. **explicit operator override** ("make job 2 shell") — honor it;
+   2. else the target is **readable as instructions** (a `.md`/`.txt`/`.prompt`
+      file, or an inline prompt) ⇒ **subagent**; read the file's contents as the
+      worker prompt;
+   3. else the target **resolves to a runnable command** (an executable / a
+      command ± args) ⇒ **shell**, wrapping the full command via `adapter:"wrap"`;
+   4. else **ask a clarifying question — never guess.**
+
+   One `jobs:` list may mix modes. Resolved-vs-ask:
+
+   | The operator names… | Resolves to | Dispatch |
+   |---|---|---|
+   | a `.md` / `.txt` / `.prompt` file, or an inline instruction | instructions | **subagent** (file contents → prompt) |
+   | an executable / a shell command (± args) | a runnable command | **shell** (`adapter:"wrap"`) |
+   | "...as a subagent" / "...as shell" | explicit override | as stated |
+   | something ambiguous ("run the thing") | — | **ASK**, don't guess |
+
+2. **Preview → confirm.** Run `python -m arunner preview <shorthand>` — it
+   echoes, **per job**, the inferred dispatch mode + source and the `--check`
+   verdict (e.g. `job 2 [build]: SHELL (wrap)  wraps: ./build.sh`). If `--check`
+   FAILS, there is **no "go"** — surface the errors for editing. A confirmation
+   is valid only for the *exact* previewed plan.
+3. **Run.** `arunner run <shorthand>` (expand → `--check` → `--init` → tick).
+4. **Persist on request.** "save that to my_run.json" → `arunner expand
+   <shorthand> --save my_run.json` (writes the `jobs:` source + the expanded
+   `plan:`); `arunner run my_run.json` reruns it faithfully.
+5. **Incremental edit (before launch).** Any edit — "add a fourth job", "pool
+   3", "make job 2 shell" — returns to the **unconfirmed** state: re-`preview`,
+   re-`--check`, fresh "go". (Injecting work into a *running* batch is the
+   streaming queue, FR-47, not this.)
+
+Two worked cases live in `examples/`: `uc10_three_md_reviews.jobs.json` (three
+`.md` tasks → subagents, pool 2) and `uc10_four_exes.jobs.json` (four
+executables → wrapped shell jobs, pool 3).
+
 ## In-context mode (dispatch-to-self)
 
 A third dispatch option (FR-46), beyond subagent and shell: the orchestrator can

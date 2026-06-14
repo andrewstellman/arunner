@@ -1,0 +1,12 @@
+{
+  "description": "UC-10 headline case: 'run three jobs from ABC.md, DEF.md, GHI.md, pool 2, subagents.' The interactive builder reads each .md as the worker prompt and infers SUBAGENT dispatch (a file readable as instructions -> in-session agent). Edit the repo path and replace each prompt body with the real file contents before running.",
+  "pool_size": 2,
+  "jobs": [
+    {"id": "abc", "repo": "/path/to/repo", "agent": "subagent",
+     "prompt": "(the contents of ABC.md) Do the task described in ABC.md on this repository and summarize what you changed."},
+    {"id": "def", "repo": "/path/to/repo", "agent": "subagent",
+     "prompt": "(the contents of DEF.md) Do the task described in DEF.md on this repository and summarize what you changed."},
+    {"id": "ghi", "repo": "/path/to/repo", "agent": "subagent",
+     "prompt": "(the contents of GHI.md) Do the task described in GHI.md on this repository and summarize what you changed."}
+  ]
+}

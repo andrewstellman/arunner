@@ -128,6 +128,47 @@ def cmd_summary(args) -> int:
     return 0
 
 
+def _job_summary(entry):
+    """Per-job dispatch mode + prompt/command source, derived deterministically
+    from the (expanded) entry — the confirm-gate echo the host agent renders.
+    No inference here: the agent already chose the mode (FR-52 intent ladder);
+    this only RENDERS it."""
+    adapter = entry.get("adapter")
+    if adapter == "wrap":
+        return "SHELL (wrap)", "wraps: %s" % " ".join(entry.get("command") or [])
+    if adapter == "tail":
+        return "SHELL (tail)", "tails: %s" % (entry.get("log_path") or "")
+    if entry.get("dispatch_mode") == "shell":
+        return "SHELL", "worker_cmd: %s" % " ".join(entry.get("worker_cmd") or [])
+    return "SUBAGENT", "in-session agent prompt"
+
+
+def cmd_preview(args) -> int:
+    """FR-52 step 2 (deterministic): print, per job, the dispatch mode + prompt/
+    command source and the --check verdict. Exit 1 if --check fails (no clean
+    'go' signal) so the host agent never confirms a broken plan."""
+    plan_path = Path(args.file).resolve()
+    doc = json.loads(plan_path.read_text(encoding="utf-8"))
+    plan = _resolve_plan(doc)
+    entries = plan.get("entries", []) if isinstance(plan, dict) else []
+    print("arunner preview: %s - %d job(s), pool %s"
+          % (plan_path.name, len(entries), plan.get("pool_size", "default")))
+    for i, e in enumerate(entries, start=1):
+        disp, src = _job_summary(e)
+        print("  job %d [%s]: %s  %s" % (i, e.get("task_id", "?"), disp, src))
+    import tempfile as _t
+    tmp = Path(_t.mkdtemp()) / "plan.json"
+    tmp.write_text(json.dumps(plan), encoding="utf-8")
+    problems = TICK.check_plan(tmp)
+    if problems:
+        print("--check: FAILED - %d problem(s) (fix before running):" % len(problems))
+        for p in problems:
+            print("  - " + p)
+        return 1
+    print("--check: OK - no problems found. Safe to run.")
+    return 0
+
+
 def cmd_new(args) -> int:
     print("arunner new - interactive build. Load the arunner skill in your "
           "agent and describe your run in plain language; it assembles, "
@@ -172,12 +213,15 @@ def _build_parser() -> argparse.ArgumentParser:
     ex.add_argument("--out", default=None, help="write the expanded plan here")
     ex.add_argument("--save", default=None,
                     help="write a my_run.json (jobs + expanded plan) here")
+
+    pv = sub.add_parser("preview", help="per-job dispatch + source + --check (FR-52)")
+    pv.add_argument("file")
     return p
 
 
 _DISPATCH = {"run": cmd_run, "status": cmd_status, "stop": cmd_stop,
              "resume": cmd_resume, "summary": cmd_summary, "new": cmd_new,
-             "expand": cmd_expand}
+             "expand": cmd_expand, "preview": cmd_preview}
 
 
 def main(argv=None) -> int:

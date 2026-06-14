@@ -85,9 +85,21 @@ class JourneyTests(unittest.TestCase):
             CLI.main(["summary", str(rd)])
         return out.getvalue()
 
+    def _preview(self, path):
+        out = io.StringIO()
+        with redirect_stdout(out):
+            rc = CLI.main(["preview", str(path)])
+        return rc, out.getvalue()
+
     def test_full_journey_run_status_summary_then_rerun(self):
         jf = self.tmp / "session.json"
         jf.write_text(json.dumps(self._wrap_job_doc()))
+
+        # --- preview (FR-52 confirm gate): per-job dispatch + --check, no agent
+        prc, pout = self._preview(jf)
+        self.assertEqual(prc, 0)                                 # --check OK -> 'go'
+        self.assertIn("SHELL (wrap)", pout)                      # inferred dispatch echoed
+        self.assertIn("--check: OK", pout)
 
         # --- run: expand -> --check -> --init (prepare; we drive deterministically)
         env1 = self._runs_env()
