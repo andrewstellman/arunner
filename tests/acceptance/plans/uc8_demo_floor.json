@@ -1,0 +1,69 @@
+{
+  "schema_version": "1",
+  "tick_interval_minutes": 1,
+  "pool_size": 2,
+  "stall_threshold_minutes": 45,
+  "launch_grace_minutes": 10,
+  "entries": [
+    {
+      "task_id": "demo-a",
+      "target_repo": ".",
+      "dispatch_mode": "shell",
+      "worker_prompt": "demo stub demo-a",
+      "worker_cmd": [
+        "python3",
+        "{HARNESS_BIN}/demo_worker.py",
+        "--heartbeat-path",
+        "{HEARTBEAT_PATH}",
+        "--task-id",
+        "{TASK_ID}",
+        "--run-dir",
+        "{RUN_DIR}",
+        "--steps",
+        "1",
+        "--sleep",
+        "0"
+      ]
+    },
+    {
+      "task_id": "demo-b",
+      "target_repo": ".",
+      "dispatch_mode": "shell",
+      "worker_prompt": "demo stub demo-b",
+      "worker_cmd": [
+        "python3",
+        "{HARNESS_BIN}/demo_worker.py",
+        "--heartbeat-path",
+        "{HEARTBEAT_PATH}",
+        "--task-id",
+        "{TASK_ID}",
+        "--run-dir",
+        "{RUN_DIR}",
+        "--steps",
+        "1",
+        "--sleep",
+        "0"
+      ]
+    },
+    {
+      "task_id": "demo-c",
+      "target_repo": ".",
+      "dispatch_mode": "shell",
+      "worker_prompt": "demo stub demo-c",
+      "worker_cmd": [
+        "python3",
+        "{HARNESS_BIN}/demo_worker.py",
+        "--heartbeat-path",
+        "{HEARTBEAT_PATH}",
+        "--task-id",
+        "{TASK_ID}",
+        "--run-dir",
+        "{RUN_DIR}",
+        "--steps",
+        "1",
+        "--sleep",
+        "0"
+      ]
+    }
+  ]
+}
