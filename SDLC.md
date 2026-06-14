@@ -34,17 +34,21 @@ operator: push / publish
 
 Requirements evolve **incident-first and council-reviewed**: a real failure (a hallucinated path; an unjustified overnight stop) becomes a dated, traceable functional requirement with a matching user story, use case, and §9 row, vetted by a council before it is built. FR-21a and FR-55 are the canonical examples.
 
-## The three test tiers
+## Tests: the necessary condition vs. the acceptance tests
 
-**1. Unit tests (red/green, mutation-pinned).** The deterministic core is a pure function of disk state, so most logic is classically testable: write the failing test first, implement, then mutation-verify that the load-bearing assertions actually bite. Wall-clock-coupled logic is made testable through an injected clock seam (`ARUNNER_NOW`), never real sleeps.
+Two distinct things. Conflating them — calling the first "the acceptance tests" or "the regression net" — is the trap.
 
-**2. Acceptance scenarios (integration-scope, functional/acceptance intent).** A folder of scenarios drives the *real* engine through the deterministic ticker (`ticker.py --once` in a loop, never the agent loop), with only the AI worker replaced by a stub. The pass/fail verdict comes from an **independent** checker that imports the standard library only and never the `arunner` package — the harness never grades its own homework (mechanically enforced). These are the tests organized around the user stories and use cases; "acceptance" names what they verify (the requirements), "integration" names how (real components wired together). A fast curated subset is the smoke gate; the full set is the regression net and runs cross-platform in CI before release.
+**The necessary-condition suite (`python -m pytest tests/` / `unittest discover`).** Unit tests (red/green, mutation-pinned, with an injected `ARUNNER_NOW` clock seam so nothing sleeps) plus deterministic scenarios that drive the *real engine* through the ticker (`ticker.py --once`, **never the agent loop**), with the AI worker replaced by a stub, graded by an **independent** stdlib-only checker (the harness never grades its own homework). This suite checks the engine in isolation. It is a **necessary condition, not a regression test** — it can be fully green while the actual use cases regress, because it never exercises the agent driving arunner. It runs cross-platform in CI; green here is the floor you stand on, not proof the product works.
 
-**3. Dogfood / measurement (NFR-12).** Real use — arunner orchestrating its own and other development — exercises the agent loop and the cadence rungs that the deterministic tiers deliberately exclude. Dogfooding **measures** which wake-up modes survive real use; it **never validates** a §9 evidence row. Rows that depend on a real OS scheduler, a real agent loop, or a specific platform require a *recorded* matrix run, not dogfooding.
+**The acceptance tests.** The agent — from Claude Code, acting as the operator's seat — drives arunner through the **use-case scenarios at their proper rungs**: in-agent (rung 1) for the agent-driven cases (UC-1, UC-9, UC-10, UC-11), and the ticker/terminal floor for the no-agent cases (UC-5, UC-6, UC-7). Canned plans use stub workers (cross-platform, no API spend) so the whole set runs back to back. Each acceptance test mirrors a user story / use case. **This is where regressions actually surface** — running arunner the way it is used. An agent bootstraps from `AGENTS.md` and runs them all.
+
+**What a regression test is.** The **acceptance tests *and* the necessary-condition suite, run together.** Neither alone is one: the pytest suite catches engine-level breakage but is blind to in-agent regressions; the acceptance tests catch use-case regressions but assume the engine floor. Only the two together are a regression test.
+
+(Dogfooding — using arunner for real development work — is separate from both: it *measures* which wake-up modes survive real use and never *validates* a §9 row, NFR-12.)
 
 ## Traceability
 
-Every acceptance scenario links to the specific user story / use case it exercises. The traceability artifact is a US/UC → scenario matrix that marks each use case **acceptance-testable** (validated by the deterministic suite) or **measurement-only** (requires a recorded run — the agent-loop and scheduler/Windows cases). Coverage is established by a **council review that concludes every US/UC is covered** by an acceptance test or is explicitly measurement-only. That review is the traceability gate; passing it is the traceability claim. This keeps "we cover every use case" from quietly overclaiming.
+Every acceptance test mirrors the specific user story / use case it covers; the necessary-condition suite is the engine floor underneath, not the acceptance layer. The traceability artifact is a US/UC → acceptance-test matrix. Because the acceptance tests run at different rungs and on different hosts, the matrix also records *where* each must run to be complete — a per-OS run (minimally Windows and macOS) for the platform-sensitive cases, and a per-agent run (Claude Code, Cursor, Copilot) for the in-agent orchestrator cases (UC-10's "any host" is verified only where an agent has actually driven it). Coverage is claimed only after a **council review concludes every US/UC is mirrored by an acceptance test**, with each test's required run-contexts named. That review is the traceability gate; it keeps "we cover every use case" from quietly overclaiming.
 
 ## The §9 evidence ledger
 
@@ -77,9 +81,9 @@ Arunner's core promise is *unattended* autonomy, so the decision to keep running
 
 ## The release gate
 
-A release is gated on **two** independent things, because one cannot substitute for the other:
+A release is gated on **both**, because neither substitutes for the other:
 
-1. **The cross-platform acceptance suite is green in CI** — the full scenario set on Windows, macOS, and Linux across supported Python versions (stdlib-only, no agent, no secrets).
-2. **The recorded measurement runs exist** for the rows the deterministic suite structurally cannot reach — the real OS scheduler, the in-session agent rung, and the Windows floor.
+1. **The necessary-condition suite is green cross-platform in CI** — the full pytest/unittest suite on Windows, macOS, and Linux across the supported Python versions (stdlib-only, no agent, no secrets). Necessary, not sufficient.
+2. **The acceptance tests pass** — the agent, from Claude Code, drives arunner through the use-case scenarios on each target platform (minimally Windows and macOS) and on each agent claimed as an orchestrator host. These are the runs that actually exercise the product; recorded, they are what lets a §9 host/floor row flip from DESIGNED to VERIFIED.
 
-Plus clean release-gate councils on the packaging and the §9 ledger. Only then does the operator publish.
+Together (1) + (2) are the regression test. Plus clean release-gate councils on the packaging and the §9 ledger. Only then does the operator publish.
