@@ -49,10 +49,13 @@ class Section9HonestyGate(unittest.TestCase):
         self.assertIn("PENDING", ev)
         self.assertNotIn("VERIFIED**", ev)   # not flipped to a VERIFIED status
 
-    def test_fr55_row_stays_pending(self):
+    def test_fr55_row_is_verified(self):
+        # instr 036 BUILT FR-55 (the continuation contract); its §9 row flipped
+        # PENDING -> VERIFIED on real test evidence. (The cadence/Windows floor
+        # row and the no-dogfooding rule below stay enforced.)
         ev = self._evidence_for("Continuation contract")
-        self.assertIn("PENDING", ev)
-        self.assertNotIn("VERIFIED**", ev)
+        self.assertIn("**VERIFIED**", ev)
+        self.assertIn("test_continuation", ev)   # cites a real in-repo test
 
     def test_no_verified_row_cites_dogfooding_or_alwayson(self):
         # the load-bearing honesty rule: a flip to VERIFIED rests on real
