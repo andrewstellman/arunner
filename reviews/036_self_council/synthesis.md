@@ -1,0 +1,23 @@
+# Instruction 036 self-council synthesis — Build FR-55: the continuation contract (autonomy integrity)
+
+*Mandatory 3-panel load-bearing review. Three fresh-context, role-locked, adversarial reviewers, each verifying on disk (running the suite, mutation-biting the verdict pin, stress-running the detector). Date: 2026-06-14.*
+
+| Panelist | Charter | Verdict |
+|----------|---------|---------|
+| `panelist_A_verdict_correctness.md` | verdict correctness & fidelity | **SHIP** |
+| `panelist_B_detector_completeness.md` | detector completeness | **SHIP** |
+| `panelist_C_honesty_regression.md` | honesty & regression | **SHIP** |
+
+## Outcome: unanimous SHIP (round 1)
+
+### Panelist A — verdict correctness & fidelity (SHIP)
+The continuation verdict is a true pure function of run-dir state. `_halt_reason` covers the full closed set `{done, failed, stop, pause, cancel, blocked, stalled, budget, internal_error}` with sensible precedence (stop > cancel > terminal done/failed > blocked > pause > budget > stalled); `internal_error` is the `_continuation` catch-all on a fault. It reads PERSISTED status (paused/cancelled/budget/states), with STOP the deliberate exception (the STOP file is truth, never consumed — FR-10). The STOP tick writes nothing — proven byte-for-byte. The load-bearing pin BITES (mutating `_halt_reason` to return "done" for a non-terminal run fails `test_continue_healthy_midrun`; restored via `shutil.copy2`, re-verified green). Engine + independent checker closed sets are in lockstep. Suite 230 green.
+
+### Panelist B — detector completeness (SHIP)
+All three violation classes fire on their configs, computed from disk (engine `type:"verdict"` journal lines + host `type:"yield"` lines + `_check_meta`), never from the scenario's own `expected`. The cross-verdict check (`false_halt_claim`) compares the host's `cited_verdict` against the engine-authored ground truth — a yield's honesty is verified, never trusted (catches the insidious in-set "we're basically done" claim). All four honest runs (honor / crash_then_resume / scheduled_gap / blocked_then_clear) stay silent, each for a principled reason; abandon vs scheduled_gap differ ONLY by the clock (`past_due`). The `test_continuation_detector_discriminates` meta-test genuinely fails a rubber stamp. The checker is mechanically stdlib-only. Two non-blocking notes: a yield citing an orphan tick is skipped (`actual is None`); `false_halt_claim` would be masked only if the run reached done by tick 2 — structurally impossible with pool 1 + 3 jobs, confirmed across 54 runs (incl. 8-way parallel).
+
+### Panelist C — honesty & regression (SHIP)
+The engine docstring, the §9 row, and INTEGRATION_TEST_PLAN all state the detector catches abandonment POST-HOC and never claim it PREVENTS a host stop (the verdict is read, not authored). The §9 flip is real: PENDING→VERIFIED citing `test_continuation.py` + the 7 `continuation_*` scenarios + `test_continuation_detector_discriminates` (all exist); the Windows-floor row stays PENDING; no dogfooding/always-on tokens in the FR-55 row. The honesty guards are correct: `test_fr55_row_is_verified` inverted; `test_floor_windows_row_stays_pending` and `test_no_verified_row_cites_dogfooding_or_alwayson` intact and NOT weakened. No regression: the engine diff is additive (136 insertions, 0 deletions); STOP-tick read-only proven byte-identical; full suite 230 green. The residual hole (a host-authored fabricated blocker the cross-check can't adjudicate) is explicitly disclosed. Commit hygiene clean; `SDLC.md`/`docs/TRACEABILITY.md` left untracked. (Transparency: a cold-start run showed stale-pycache failures that cleared to a stable 230 after a scoped purge — not a regression.)
+
+## Net
+FR-55 is built: the engine emits, every tick, a deterministic continuation verdict (the closed halt set) — a pure function of run-dir state — persisted to `harness_status.json` + journaled, while a STOP tick stays fully read-only. Host-authored blocker records drive `HALT:blocked` and round-trip. The integration runner gains a scriptable stub host; the independent stdlib checker gains the three-class abandonment detector that cross-checks each yield's cited verdict against the engine's ground truth. Seven `continuation_contract` configs + verdict-fidelity + a discrimination meta-test prove the contract is honored on the happy paths, caught on the three violations, and silent on a recovered crash / scheduled wait. The §9 FR-55 row flips to VERIFIED on this evidence; the cadence/Windows floor row stays PENDING. The failure is caught **post-hoc, not prevented** — exactly what FR-55 promises. Suite 209 → 230 (additive). FR-56 remains spec-only (v0.2).
