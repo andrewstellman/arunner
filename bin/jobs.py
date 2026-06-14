@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""wakecycle jobs  -  the `jobs:` shorthand expander (FR-43).
+"""arunner jobs  -  the `jobs:` shorthand expander (FR-43).
 
 A higher-level, ergonomic plan form the skill/TOOLKIT expands into the full
 placeholder-laden ``plan.json`` the engine consumes. The low-level plan schema

@@ -1,14 +1,15 @@
 {
-  "name": "wakecycle",
+  "name": "@andrewstellman/arunner",
   "version": "0.1.0",
-  "description": "A batch orchestrator for AI coding agents that runs inside your existing agent session - no server, no daemon, no admin rights. (0.0.1 reserves the name; the harness ships here shortly.)",
-  "bin": { "wakecycle": "npm-bin/wakecycle.js" },
+  "description": "A batch orchestrator for AI coding agents that runs inside your existing agent session - no server, no daemon, no admin rights.",
+  "publishConfig": { "access": "public" },
+  "bin": { "arunner": "npm-bin/arunner.js" },
   "keywords": ["agent", "orchestration", "ai", "harness", "batch", "claude"],
   "author": "Andrew Stellman <andrew@stellman.com>",
   "license": "Apache-2.0",
-  "homepage": "https://github.com/andrewstellman/wakecycle#readme",
-  "repository": { "type": "git", "url": "git+https://github.com/andrewstellman/wakecycle.git" },
-  "bugs": { "url": "https://github.com/andrewstellman/wakecycle/issues" },
+  "homepage": "https://github.com/andrewstellman/arunner#readme",
+  "repository": { "type": "git", "url": "git+https://github.com/andrewstellman/arunner.git" },
+  "bugs": { "url": "https://github.com/andrewstellman/arunner/issues" },
   "engines": { "node": ">=16" },
   "files": ["npm-bin/", "README.md", "LICENSE"]
 }

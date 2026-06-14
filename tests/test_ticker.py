@@ -74,7 +74,7 @@ def _shell_entry(tid, cmd=None, auth_check=None):
 def _run_ticker(plan_path, *args, runs_dir=None):
     env = dict(os.environ)
     if runs_dir:
-        env["WAKECYCLE_RUNS_DIR"] = str(runs_dir)
+        env["ARUNNER_RUNS_DIR"] = str(runs_dir)
     return subprocess.run([sys.executable, str(_TICKER), str(plan_path), *args],
                           capture_output=True, text=True, env=env,
                           encoding="utf-8", errors="replace", timeout=60)

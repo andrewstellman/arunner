@@ -3,7 +3,7 @@
 Role: independent adversarial reviewer, HONESTY charter. Reviewed the four in-context
 surfaces in full, `docs/REQUIREMENTS.md` (FR-46/47/48/49/50, C-6, C-7, §8, UC-9),
 `tests/test_incontext.py`, and `bin/incontext.py`. All checks run live against
-`/Users/andrewstellman/Documents/wakecycle`. Full suite: **176 passed in 11.73s**.
+`/Users/andrewstellman/Documents/arunner`. Full suite: **176 passed in 11.73s**.
 
 ## 1. Adversarial over-claim hunt (read the prose, not just the substring list)
 
@@ -80,7 +80,7 @@ auto-recovery.
 ## Tree integrity
 
 Left the working tree exactly as found: `README.md`, `TOOLKIT.md`,
-`plugins/wakecycle/skills/wakecycle/SKILL.md` modified (+81 insertions); `bin/incontext.py`,
+`plugins/arunner/skills/arunner/SKILL.md` modified (+81 insertions); `bin/incontext.py`,
 `tests/test_incontext.py` untracked. No source edited — every mutation was reverted from a
 backup and re-verified (12/12 in-context tests pass post-restore; full suite 176 passed). I
 edited no source under review.

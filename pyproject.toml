@@ -3,7 +3,7 @@ requires = ["setuptools>=61"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "wakecycle"
+name = "arunner"
 version = "0.1.0"
 description = "A batch orchestrator for AI coding agents that runs inside your existing agent session - no server, no daemon, no admin rights. (0.0.1 reserves the name; the harness ships here shortly.)"
 readme = "README.md"
@@ -21,11 +21,11 @@ classifiers = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/andrewstellman/wakecycle"
-Repository = "https://github.com/andrewstellman/wakecycle"
+Homepage = "https://github.com/andrewstellman/arunner"
+Repository = "https://github.com/andrewstellman/arunner"
 
 [project.scripts]
-wakecycle = "wakecycle._reserve:main"
+arunner = "arunner._reserve:main"
 
 [tool.setuptools]
-packages = ["wakecycle"]
+packages = ["arunner"]

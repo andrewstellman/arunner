@@ -9,7 +9,7 @@ checker is constrained to stdlib (that boundary is the whole point).
 
 Scenario format (documented in tests/integration/README.md): a folder with a
 single ``scenario.json`` = {description, plan, control?, expected}. The plan is
-a normal wakecycle plan; the runner substitutes ``{STUB}`` (this dir's
+a normal arunner plan; the runner substitutes ``{STUB}`` (this dir's
 stub_worker.py) and ``{SCENARIO_DIR}`` before --init. The engine substitutes
 its own {HEARTBEAT_PATH}/{TASK_ID}/{RUN_DIR}/{HARNESS_BIN} block at dispatch.
 """
@@ -132,7 +132,7 @@ def run_scenario(scenario_dir, work_dir):
     plan_path.write_text(json.dumps(plan), encoding="utf-8")
     runs_root = work_dir / "runs"
     runs_root.mkdir(parents=True, exist_ok=True)
-    env = dict(os.environ, WAKECYCLE_RUNS_DIR=str(runs_root))
+    env = dict(os.environ, ARUNNER_RUNS_DIR=str(runs_root))
 
     # FR-42: dogfood the pre-flight -- a malformed scenario plan must fail
     # loudly HERE, not produce a confusing run. (target_repo is {SCENARIO_DIR},

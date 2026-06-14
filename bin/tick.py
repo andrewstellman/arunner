@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""wakecycle tick — the deterministic harness state-machine stepper.
+"""arunner tick — the deterministic harness state-machine stepper.
 
 The deterministic Python half of the harness-as-skill. The orchestrator
 SKILL.md runs this once per tick; the script reads disk state, advances
@@ -99,9 +99,9 @@ _STATE_DISPLAY = {"auth_or_launch_failed": "LAUNCH-FAIL"}
 
 
 def _now() -> float:
-    """Wall-clock seconds. Overridable via WAKECYCLE_NOW (epoch float)
+    """Wall-clock seconds. Overridable via ARUNNER_NOW (epoch float)
     so stall / launch-grace logic is testable without sleeping."""
-    override = os.environ.get("WAKECYCLE_NOW")
+    override = os.environ.get("ARUNNER_NOW")
     if override:
         try:
             return float(override)
@@ -166,10 +166,10 @@ def _lock_pid(run_dir: Path, job_id: str):
 
 
 def _utc_iso() -> str:
-    # Derive the ISO stamp from _now() so the WAKECYCLE_NOW clock seam is
+    # Derive the ISO stamp from _now() so the ARUNNER_NOW clock seam is
     # UNIFORM across the engine (epoch + ISO): claimed_ts/reaped_ts honor the
     # same injected clock as claimed_at, making FR-45 durations deterministic in
-    # tests. No production effect without WAKECYCLE_NOW.
+    # tests. No production effect without ARUNNER_NOW.
     return datetime.fromtimestamp(_now(), timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
@@ -206,9 +206,9 @@ def init_run(plan_path: Path) -> Path:
     if not entries:
         raise ValueError(f"plan {plan_path} has no entries[]")
     stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-    # Base dir is <repo>/harness_runs by default; WAKECYCLE_RUNS_DIR
+    # Base dir is <repo>/harness_runs by default; ARUNNER_RUNS_DIR
     # overrides it (tests point this at a tmp dir to stay hermetic).
-    base = os.environ.get("WAKECYCLE_RUNS_DIR")
+    base = os.environ.get("ARUNNER_RUNS_DIR")
     runs_root = Path(base) if base else Path(__file__).resolve().parent.parent / "harness_runs"
     run_dir = runs_root / stamp
     for sub in ("queue", "claimed", "results"):
@@ -689,7 +689,7 @@ def _md_cell(v) -> str:
 
 
 def _render_summary_md(payload: dict) -> str:
-    lines = ["# wakecycle run summary",
+    lines = ["# arunner run summary",
              "",
              "Run-dir: `%s`  -  generated %s"
              % (payload["run_dir"], payload["generated_ts"]),
@@ -1008,7 +1008,7 @@ def _dispatch(run_dir, runs, entries, pool_size, now) -> list[dict]:
             _write_json(run_dir / "claimed" / (r["job_id"] + ".lock"), {
                 "task_id": r["task_id"],
                 "claimed_ts": _utc_iso(),
-                "dispatched_by": "wakecycle_tick",
+                "dispatched_by": "arunner_tick",
                 "dispatch_mode": mode,
                 "pid": None,
             })
@@ -1172,7 +1172,7 @@ def _print_intro() -> None:
     """Self-describing help on no-args / --help (stdlib only; the standalone
     engine carries no external banner dependency)."""
     print(__doc__.strip() if __doc__ else
-          "wakecycle tick (--init <plan-path> | <run-dir>)")
+          "arunner tick (--init <plan-path> | <run-dir>)")
 
 
 class _TickLock:
@@ -1227,11 +1227,11 @@ def _locked_skip_output(run_dir: Path) -> dict:
     }
 
 
-def _wakecycle_version() -> str:
-    """The single canonical version (FR-34): wakecycle/__init__.py:__version__.
+def _arunner_version() -> str:
+    """The single canonical version (FR-34): arunner/__init__.py:__version__.
     bin scripts aren't installed as a package, so read it by repo-relative
     path rather than importing -- one source, every surface reads it."""
-    init = Path(__file__).resolve().parent.parent / "wakecycle" / "__init__.py"
+    init = Path(__file__).resolve().parent.parent / "arunner" / "__init__.py"
     try:
         for line in init.read_text(encoding="utf-8").splitlines():
             if line.startswith("__version__"):
@@ -1408,7 +1408,7 @@ def main(argv) -> int:
     args = list(argv[1:])
     # FR-34 banner: the running version is always visible. To stderr so the
     # --init run-dir path and the per-tick JSON stay clean on stdout.
-    print("wakecycle %s" % _wakecycle_version(), file=sys.stderr)
+    print("arunner %s" % _arunner_version(), file=sys.stderr)
     if not args or args in (["-h"], ["--help"]):
         _print_intro()
         return 0

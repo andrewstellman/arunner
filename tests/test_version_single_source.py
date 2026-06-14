@@ -1,6 +1,6 @@
 """FR-34 — one canonical version, every mirror tracks it (drift-tested).
 
-The single source is ``wakecycle/__init__.py:__version__``. ``pyproject.toml``,
+The single source is ``arunner/__init__.py:__version__``. ``pyproject.toml``,
 ``package.json``, and the plugin SKILL.md frontmatter MIRROR it; the
 ``_reserve`` console stub READS it (no hardcoded literal). This test is
 VALUE-AGNOSTIC: it never hardcodes the version number — it only asserts every
@@ -26,11 +26,11 @@ _ROOT = Path(__file__).resolve().parents[1]
 
 
 def _canonical() -> str:
-    for line in (_ROOT / "wakecycle" / "__init__.py").read_text(
+    for line in (_ROOT / "arunner" / "__init__.py").read_text(
             encoding="utf-8").splitlines():
         if line.startswith("__version__"):
             return line.split("=", 1)[1].strip().strip('"').strip("'")
-    raise AssertionError("no __version__ in wakecycle/__init__.py")
+    raise AssertionError("no __version__ in arunner/__init__.py")
 
 
 class VersionSingleSourceTests(unittest.TestCase):
@@ -53,7 +53,7 @@ class VersionSingleSourceTests(unittest.TestCase):
 
     def test_skill_frontmatter_mirrors_canonical(self):
         # the 1.5.9-vs-0.0.1 extraction bug lived exactly here
-        skill = (_ROOT / "plugins" / "wakecycle" / "skills" / "wakecycle"
+        skill = (_ROOT / "plugins" / "arunner" / "skills" / "arunner"
                  / "SKILL.md").read_text(encoding="utf-8")
         m = re.search(r"(?m)^version:\s*(\S+)\s*$", skill)
         self.assertIsNotNone(m, "SKILL.md frontmatter has no version")
@@ -62,13 +62,13 @@ class VersionSingleSourceTests(unittest.TestCase):
     def test_reserve_stub_reads_canonical(self):
         sys.path.insert(0, str(_ROOT))
         try:
-            import wakecycle
-            from wakecycle import _reserve
+            import arunner
+            from arunner import _reserve
         finally:
             sys.path.pop(0)
-        self.assertEqual(wakecycle.__version__, self.canon)
+        self.assertEqual(arunner.__version__, self.canon)
         # the console stub builds its message from __version__, not a literal
-        self.assertTrue(_reserve._MSG.startswith("wakecycle %s" % self.canon),
+        self.assertTrue(_reserve._MSG.startswith("arunner %s" % self.canon),
                         "_reserve._MSG must read __version__: %r" % _reserve._MSG)
 
     def test_bin_scripts_read_canonical(self):
@@ -78,7 +78,7 @@ class VersionSingleSourceTests(unittest.TestCase):
             "tick_ver", _ROOT / "bin" / "tick.py")
         mod = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(mod)
-        self.assertEqual(mod._wakecycle_version(), self.canon)
+        self.assertEqual(mod._arunner_version(), self.canon)
 
 
 if __name__ == "__main__":

@@ -1,7 +1,7 @@
 {
   "$schema": "http://json-schema.org/draft-07/schema#",
-  "$id": "https://github.com/andrewstellman/wakecycle/schemas/harness/plan.schema.json",
-  "title": "wakecycle plan",
+  "$id": "https://github.com/andrewstellman/arunner/schemas/harness/plan.schema.json",
+  "title": "arunner plan",
   "description": "Input to `tick.py --init`. One run per entry. dispatch_mode is 'subagent' (in-session, cadence rung 1) or 'shell' (detached host-CLI, cadence rungs 2-4 / the ticker). Top-level knobs default in the tick script if omitted.",
   "type": "object",
   "required": ["entries"],
@@ -82,7 +82,7 @@
           "command": {
             "type": "array",
             "items": { "type": "string" },
-            "description": "adapter only: the argv to run. Required for adapter 'wrap'; optional for 'tail' (when wakecycle launches+owns the job that writes log_path)."
+            "description": "adapter only: the argv to run. Required for adapter 'wrap'; optional for 'tail' (when arunner launches+owns the job that writes log_path)."
           },
           "log_path": {
             "type": "string",

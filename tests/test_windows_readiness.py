@@ -64,18 +64,18 @@ class StatusTableAsciiTests(unittest.TestCase):
     def setUp(self):
         self._tmp = tempfile.TemporaryDirectory()
         self._n_inits = 0
-        os.environ.pop("WAKECYCLE_NOW", None)
+        os.environ.pop("ARUNNER_NOW", None)
 
     def tearDown(self):
-        os.environ.pop("WAKECYCLE_RUNS_DIR", None)
-        os.environ.pop("WAKECYCLE_NOW", None)
+        os.environ.pop("ARUNNER_RUNS_DIR", None)
+        os.environ.pop("ARUNNER_NOW", None)
         self._tmp.cleanup()
 
     def _init(self, pool=1, n=1):
         # Unique runs-dir per call: init_run names run-dirs by 1-second
         # timestamp, so two inits in the same second would collide.
         self._n_inits += 1
-        os.environ["WAKECYCLE_RUNS_DIR"] = str(
+        os.environ["ARUNNER_RUNS_DIR"] = str(
             Path(self._tmp.name) / f"hr{self._n_inits}")
         pf = Path(self._tmp.name) / "plan.json"
         pf.write_text(json.dumps({
@@ -100,10 +100,10 @@ class StatusTableAsciiTests(unittest.TestCase):
         (rd / "run-01" / "heartbeat.ndjson").write_text(
             '{"ts":"t","task_id":"t-0","schema_version":"1","phase":'
             '"exploration","step":"s","status":"IN_PROGRESS"}\n')
-        os.environ["WAKECYCLE_NOW"] = str(
+        os.environ["ARUNNER_NOW"] = str(
             (rd / "run-01" / "heartbeat.ndjson").stat().st_mtime + 99 * 60)
         self._assert_ascii(T.tick(rd)["status_table"], "stalled")
-        os.environ.pop("WAKECYCLE_NOW", None)
+        os.environ.pop("ARUNNER_NOW", None)
         # done tick
         (rd / "run-01" / "heartbeat.ndjson").write_text(
             '{"ts":"t","task_id":"t-0","schema_version":"1","status":'

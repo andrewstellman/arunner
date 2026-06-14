@@ -1,4 +1,4 @@
-# Wakecycle
+# Arunner
 
 **A batch orchestrator for AI coding agents that runs inside the agent
 session you already have — no server, no daemon, no framework, no API keys
@@ -57,15 +57,15 @@ malformed line is skipped with a warning, never fatal. (FR-18, FR-19)
 Install at user level (no admin):
 
 ```bash
-pip install --user wakecycle      # Python 3.10+
+pip install --user arunner      # Python 3.10+
 # or
-npm install wakecycle
+npm install arunner
 ```
 
-> **0.0.1 is a name reservation.** Installing today gives you the `wakecycle`
+> **0.0.1 is a name reservation.** Installing today gives you the `arunner`
 > placeholder command; the harness itself runs from this repo via
 > `python3 bin/tick.py`, `python3 bin/ticker.py`, and `python3 bin/heartbeat.py`.
-> The `wakecycle` / `wakecycle-ticker` / `wakecycle-heartbeat` console commands
+> The `arunner` / `arunner-ticker` / `arunner-heartbeat` console commands
 > wire up at v0.1.0; the examples below use those names.
 
 The package ships an **example plan with cross-platform Python stub
@@ -91,7 +91,7 @@ subagents** as workers.
 No agent session, no scheduler, no admin rights — just Python:
 
 ```bash
-wakecycle-ticker path/to/demo-plan.json      # loop: tick -> spawn -> sleep -> repeat
+arunner-ticker path/to/demo-plan.json      # loop: tick -> spawn -> sleep -> repeat
 ```
 
 The ticker replaces the agent: each tick it runs the engine, spawns the
@@ -137,7 +137,7 @@ open for the run's duration. (UC-5)
 
 **4. Can't even keep a window open?**
 → Advance the run by hand, one printed command at a time
-(`wakecycle-ticker --once <run-dir>`). **Cadence rung 4.** The harness never
+(`arunner-ticker --once <run-dir>`). **Cadence rung 4.** The harness never
 strands a run: every failure path prints the exact next command. (UC-7,
 FR-25)
 
@@ -184,7 +184,7 @@ has a host-side fragility — see the safety tick.
 Because ticks are idempotent and a per-run-dir lockfile serializes concurrent
 ticks, **redundant ticking is safe by construction.** So pair a rung-1
 (in-session timer) run with a low-frequency **external safety tick** —
-cron/scheduler or a second terminal running `wakecycle-ticker --once <run-dir>`
+cron/scheduler or a second terminal running `arunner-ticker --once <run-dir>`
 at roughly 3× the plan cadence against the same run directory. While the
 in-session timer is alive, safety ticks are cycle-only no-ops; if the timer's
 turn dies, the safety tick rescues the run within one safety interval, with no
@@ -260,7 +260,7 @@ diagnostic hint in both the result record and the table (FR-21b).
   interrupts the agent mid-action. In-flight detached workers run to their own
   terminal states (documented orphan behavior; no kill in this release). (UC-3)
 - **Resume:** point any fresh session at the existing run directory (skip
-  `--init`), or run `wakecycle-ticker --once <run-dir>` — or just delete the
+  `--init`), or run `arunner-ticker --once <run-dir>` — or just delete the
   `STOP`. Disk state resumes the loop; at most one cycle increment beyond the
   interruption, zero duplicated work. (UC-4)
 
@@ -275,6 +275,10 @@ with zero Quality-Playbook involvement. It's extracted here because *a job is
 anything that appends JSON lines to a file* is a general contract, not a
 quality-tooling one. The Quality Playbook keeps a vendored copy with a
 lineage note. (See the [Quality Playbook](https://github.com/andrewstellman/quality-playbook).)
+
+*Naming: developed under the working name **wakecycle** (the abandoned 0.0.1
+PyPI/npm reservations are under that name); renamed to **arunner** — agent
+runner — at v0.1.0.*
 
 ## License
 

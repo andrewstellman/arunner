@@ -1,4 +1,4 @@
-# Wakecycle Validation Matrix
+# Arunner Validation Matrix
 
 *Status: v1.0, 2026-06-12. The test plan that flips README host-support cells from DESIGNED to VERIFIED. Every PASS recorded here must cite a run-dir or transcript; every README cell change must cite a row here (NFR-12). Executors: OPERATOR (human, owns Windows + anything requiring his machines/accounts), WORKER (the QPB runner session, native macOS), ORCH (the orchestrating chat's Linux sandbox).*
 
@@ -33,7 +33,7 @@
 
 | ID | Test | Executor | Setup | PASS criteria | README cell |
 |---|---|---|---|---|---|
-| V-11 | **Real compute jobs, no AI** — 3 shell jobs that do actual work (e.g. clone a small public repo + run its test suite; tar/compress a tree; run wakecycle's own 65-test suite) each wrapped in a ~10-line script that heartbeats via `bin/heartbeat.py` before/during/after | WORKER (macOS) | shell plan, pool 2, realistic stall threshold | mixed durations → staggered dispatch; real exit codes mapped to COMPLETED/FAILED terminals; one job INTENTIONALLY failing (nonzero exit → FAILED heartbeat) displays correctly | the worker-contract paragraph; "no-helper path" if one job uses raw `echo >>` instead of the helper |
+| V-11 | **Real compute jobs, no AI** — 3 shell jobs that do actual work (e.g. clone a small public repo + run its test suite; tar/compress a tree; run arunner's own 65-test suite) each wrapped in a ~10-line script that heartbeats via `bin/heartbeat.py` before/during/after | WORKER (macOS) | shell plan, pool 2, realistic stall threshold | mixed durations → staggered dispatch; real exit codes mapped to COMPLETED/FAILED terminals; one job INTENTIONALLY failing (nonzero exit → FAILED heartbeat) displays correctly | the worker-contract paragraph; "no-helper path" if one job uses raw `echo >>` instead of the helper |
 | V-12 | **Stall detection live** — a real worker killed mid-run (`kill <PID from claim lock>`), short `stall_threshold_minutes` (2) | WORKER | V-11's plan, one entry | STALLED appears after threshold; PID-liveness shows dead-process fast-fail (A-5); run continues; table honest | stall claims |
 | V-13 | **STOP with real workers in flight** | WORKER | V-11 rerun | stop tick read-only; orphan semantics as documented (real processes run to completion); resume after deleting STOP | UC-3/UC-4 with real processes |
 | V-14 | **Real AI workers via `worker_cmd`** — at least one entry whose worker is a real agent CLI invocation doing a small real task (e.g. `claude` non-interactive or `codex exec` summarizing a repo to a file, heartbeat-wrapped) | OPERATOR decision first (real API/subscription spend, ~minutes of agent time) then WORKER | shell plan, 1-2 entries | agent worker launches detached, heartbeats, terminal sentinel carries a real `result_file` | "Codex/Copilot/Cursor CLIs as workers" partially; full per-host matrix stays v0.2 |
@@ -42,8 +42,8 @@
 
 | ID | Date | Executor | Verdict | Evidence |
 |---|---|---|---|---|
-| V-11 | 2026-06-12 | WORKER (macOS) | **PASS** | Ticker (rung 3, shell dispatch), pool 2, 4 REAL jobs: wakecycle's own suite (`65 passed`) → COMPLETED; tar+gz of bin/tests/schemas (138407 bytes) → COMPLETED; sha256 of bin/*.py via **raw `echo >>`, no helper** → COMPLETED; intentional nonzero (`rc=7`) → FAILED. Staggered dispatch (2 then 2), real exit codes → terminals. Run-dir `20260613T003254Z`; transcript in `outputs/015`. Substantiates the worker-contract + no-helper-path claims with real compute. |
-| V-12 | 2026-06-12 | WORKER (macOS) | **PASS** | **A-5 dead-process fast-fail:** killed live worker PID 50735 → next `--once` tick marked it FAILED fast ("shell worker process 50735 exited without a terminal heartbeat"), not waiting out the stall threshold. **Time-based STALLED:** a worker verified still ALIVE (`kill -0`) with heartbeat aged past `stall_threshold_minutes:2` (advanced via the `WAKECYCLE_NOW` test-clock, not a 3-min real wait) → `stalled`; A-5 correctly did NOT fast-fail the live PID. Run-dirs `20260613T003434Z` (kill), `20260613T003451Z` (stall). |
+| V-11 | 2026-06-12 | WORKER (macOS) | **PASS** | Ticker (rung 3, shell dispatch), pool 2, 4 REAL jobs: arunner's own suite (`65 passed`) → COMPLETED; tar+gz of bin/tests/schemas (138407 bytes) → COMPLETED; sha256 of bin/*.py via **raw `echo >>`, no helper** → COMPLETED; intentional nonzero (`rc=7`) → FAILED. Staggered dispatch (2 then 2), real exit codes → terminals. Run-dir `20260613T003254Z`; transcript in `outputs/015`. Substantiates the worker-contract + no-helper-path claims with real compute. |
+| V-12 | 2026-06-12 | WORKER (macOS) | **PASS** | **A-5 dead-process fast-fail:** killed live worker PID 50735 → next `--once` tick marked it FAILED fast ("shell worker process 50735 exited without a terminal heartbeat"), not waiting out the stall threshold. **Time-based STALLED:** a worker verified still ALIVE (`kill -0`) with heartbeat aged past `stall_threshold_minutes:2` (advanced via the `ARUNNER_NOW` test-clock, not a 3-min real wait) → `stalled`; A-5 correctly did NOT fast-fail the live PID. Run-dirs `20260613T003434Z` (kill), `20260613T003451Z` (stall). |
 | V-13 | 2026-06-12 | WORKER (macOS) | **PASS** | STOP tick fully read-only ("STOP - halting", cycle 1→1 and state unchanged); the detached orphan worker ran to its own COMPLETED terminal despite STOP (documented orphan semantics); deleting STOP + ticking reaped it → completed → DONE (resume, UC-3/UC-4 with real processes). Run-dir `20260613T003526Z`. |
 | V-9 | 2026-06-12 | WORKER (macOS) | **FINDING (not a clean pass — cron cell stays DESIGNED)** | cron FIRES on this Mac (1-min canary + diagnostic both fired on schedule) and CAN access `~/Documents` (cd+ls OK); cron-driven `--once` ticks advance the state machine unattended (cycle 0→2, dispatch+reap in the cron log); the **E1 lockfile skip is witnessed** (two concurrent `--once` → one ticks, one prints "another tick is already in progress; this tick skipped cleanly (E1)" + the FR-25 floor command); the ticker works under cron's bare env (`env -i` → DONE). **BUT** a worker spawned detached (`start_new_session`) by a cron `--once` tick does NOT survive the cron job's exit — launchd terminates the cron job's process group, killing the child (v9-b PID 53800 DEAD, zero progress heartbeat) → the run never reaches done unattended. Run-dirs `20260613T003733Z`, `20260613T004506Z`. **Crontab snapshot/restore clean** (was: no crontab; `crontab -l` → none after). |
 | V-9 (re-run) | 2026-06-12 | WORKER (macOS) | **PASS (finding resolved)** | After the instruction-016 double-fork detachment fix (`ticker._spawn_worker`), cron drove a fresh 2-job shell plan to `done:true` **fully unattended (no foreground process)** — both workers COMPLETED ('survived cron via double-fork'); the cron-spawned workers now reparent to init (PID 1) and survive the cron job's process-tree teardown. E1 overlapping-fire lockfile skip re-witnessed. Crontab snapshot/restored clean (was: none -> none). Unit pin: a worker spawned via the new path has PPID==1 and the claim lock carries its real PID (A-5); reverting to single-fork fails the pin. Run-dir `20260613T034557Z`. **-> README 'OS scheduler, cadence 2 - cron (macOS)' flipped DESIGNED -> VERIFIED.** |
@@ -61,13 +61,13 @@
 
 *Operator confirmed Windows hardware available (2026-06-12). ~20 minutes. Capture terminal output as you go and paste it back to the orchestrator; the run-dirs are the evidence.*
 
-**Prerequisites (all user-level, no admin):** Python 3.10+ from python.org ("install for me only"; the `py` launcher) or the Microsoft Store build; `git` if present (otherwise download the repo ZIP from github.com/andrewstellman/wakecycle and unzip).
+**Prerequisites (all user-level, no admin):** Python 3.10+ from python.org ("install for me only"; the `py` launcher) or the Microsoft Store build; `git` if present (otherwise download the repo ZIP from github.com/andrewstellman/arunner and unzip).
 
 **V-7a — ticker loop in PowerShell:**
 ```powershell
 cd $env:USERPROFILE\Documents
-git clone https://github.com/andrewstellman/wakecycle    # or unzip the ZIP here
-cd wakecycle
+git clone https://github.com/andrewstellman/arunner    # or unzip the ZIP here
+cd arunner
 py -m unittest discover -s tests        # baseline: the suite on Windows (capture count)
 py bin\ticker.py <shell demo plan>      # the fast shell-dispatch plan; watch it to DONE
 ```

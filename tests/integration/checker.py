@@ -1,7 +1,7 @@
 """Independent disk-assertion checker for integration scenarios (FR-51).
 
 INVARIANT (mechanically enforced by test_checker_independence.py): this module
-imports the STANDARD LIBRARY ONLY -- never the ``wakecycle`` package, never any
+imports the STANDARD LIBRARY ONLY -- never the ``arunner`` package, never any
 ``bin/`` module. The harness must never grade its own homework: the verdict is
 a plain-Python read of the disk artifacts the run left behind
 (``harness_status.json``, ``results/result-NNNNN.json``, per-run

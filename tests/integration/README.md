@@ -8,7 +8,7 @@ the suite trustworthy:
    `bin/ticker.py --once` in a loop (`runner.py`), so a run is reproducible and
    CI-able and the flaky Class-C path never enters the regression net.
 2. **Independent verdict.** The pass/fail check (`checker.py`) is plain Python
-   that **imports the standard library only** — never the `wakecycle` package.
+   that **imports the standard library only** — never the `arunner` package.
    The harness never grades its own homework. `test_checker_independence.py`
    enforces this mechanically (an AST scan that fails if the checker ever
    imports the harness).
@@ -21,7 +21,7 @@ One folder per scenario under `scenarios/<name>/`, each with a single
 ```json
 {
   "description": "human-readable",
-  "plan": { ... a normal wakecycle plan ... },
+  "plan": { ... a normal arunner plan ... },
   "control": { "write_stop_after_tick": 2 },     // optional
   "expected": {
     "done": true,                                 // run reached done
@@ -44,7 +44,7 @@ block at dispatch (FR-21a: no model-transcribed paths).
 Heartbeats `STARTING` + `IN_PROGRESS × N`, then — if `--hold-file F` is given —
 holds until `F` exists before its terminal line. That hold is what the control
 iterations (PAUSE/stall/CANCEL) act against. Stdlib-only raw JSON appends (also
-exercises the no-helper worker contract). Honours `WAKECYCLE_NOW` (the clock
+exercises the no-helper worker contract). Honours `ARUNNER_NOW` (the clock
 seam).
 
 ## How a scenario is graded
@@ -59,7 +59,7 @@ wires it, and proves the checker can actually fail (a deliberately-wrong
 
 ## Dogfood
 
-Because a scenario IS a wakecycle plan, this suite doubles as a worked example
-of Wakecycle orchestrating a batch — the dogfood. (Dogfooding *measures* which
+Because a scenario IS a arunner plan, this suite doubles as a worked example
+of Arunner orchestrating a batch — the dogfood. (Dogfooding *measures* which
 wake-up modes survive real use; it never *validates* a §9 evidence row — those
 need a recorded matrix run, NFR-12.)

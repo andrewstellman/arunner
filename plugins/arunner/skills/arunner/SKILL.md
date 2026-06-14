@@ -1,11 +1,11 @@
 ---
-name: wakecycle
+name: arunner
 description: Orchestrate AI coding agents (or any job that appends JSON lines to a file) across many repos or branches from one agent session. Drives a disk-backed state machine one idempotent tick at a time - each tick the tick script reads workers' heartbeats, advances the state machine, and lists which workers to dispatch; the orchestrator launches them, prints the status table, and schedules the next tick (via ScheduleWakeup at cadence rung 1, or the foreground ticker at lower rungs). Dispatch is in-session subagents (rung 1) or detached shell workers. Runs until every job is terminal or a STOP file appears. Use when asked to run a batch of agent jobs, a benchmark plan, or multi-repo reviews.
 version: 0.1.0
 license: Apache-2.0
 ---
 
-# wakecycle harness
+# arunner harness
 
 You are the harness orchestrator. Your entire per-tick job is small and
 fixed: run one Python script, dispatch the worker subagents it lists,
@@ -43,10 +43,10 @@ selected, in one line to the operator:
 As a Claude Code session you run at **cadence 1 + dispatch 1**: you have
 `ScheduleWakeup` and a subagent tool, and your session persists across the
 workers' lifetime. Announce that, leading with the version banner (FR-34) —
-the running version is always visible: *"wakecycle <version> — Harness:
+the running version is always visible: *"arunner <version> — Harness:
 cadence rung 1 (ScheduleWakeup) + dispatch rung 1 (subagent). Plan has N
 entries, pool P."* (the version is the one `bin/tick.py` printed to stderr;
-the canonical source is `wakecycle/__init__.py:__version__`). If the plan's
+the canonical source is `arunner/__init__.py:__version__`). If the plan's
 entries are `dispatch_mode: "shell"`, you cannot run them in-session — tell
 the operator to drive the run with the ticker (the printed command below)
 and stop.
@@ -58,34 +58,34 @@ EXACT command to continue this run from a plain terminal window, with the
 absolute paths filled in:
 
     To continue this run in another window, execute:
-      python3 <WAKECYCLE_REPO>/bin/ticker.py --once <RUN_DIR>
-    (or, to loop it automatically: python3 <WAKECYCLE_REPO>/bin/ticker.py <RUN_DIR>)
+      python3 <ARUNNER_REPO>/bin/ticker.py --once <RUN_DIR>
+    (or, to loop it automatically: python3 <ARUNNER_REPO>/bin/ticker.py <RUN_DIR>)
 
 The floor is always one copy-paste away; no run is ever stranded.
 
 ## Determine your paths first
 
-- `WAKECYCLE_REPO` = `git rev-parse --show-toplevel` (run once; use absolute
-  paths from then on). The tick script is `<WAKECYCLE_REPO>/bin/tick.py`.
+- `ARUNNER_REPO` = `git rev-parse --show-toplevel` (run once; use absolute
+  paths from then on). The tick script is `<ARUNNER_REPO>/bin/tick.py`.
 - `PLAN` = the harness plan file the operator named (a `*.json` matching
   `schemas/plan.schema.json`).
 
 **Invocation hygiene (load-bearing):** always invoke the script directly —
-`python3 <WAKECYCLE_REPO>/bin/tick.py <arg>`. Never wrap it in an
+`python3 <ARUNNER_REPO>/bin/tick.py <arg>`. Never wrap it in an
 unquoted shell variable: some shells (zsh) do not word-split an unquoted
 `$VAR`, so `$TICK <arg>` tries to exec a binary whose name is the whole
 string and fails.
 
 ## First invocation only
 
-1. Run `python3 <WAKECYCLE_REPO>/bin/tick.py --init <PLAN>`. It
+1. Run `python3 <ARUNNER_REPO>/bin/tick.py --init <PLAN>`. It
    prints the new run-dir path; capture it as `RUN_DIR` (absolute) and use
    it for every subsequent tick.
 2. Immediately perform one tick (below) against `RUN_DIR`.
 
 ## Per-tick sequence (do exactly this, nothing more)
 
-1. Run `python3 <WAKECYCLE_REPO>/bin/tick.py <RUN_DIR>`. Capture stdout.
+1. Run `python3 <ARUNNER_REPO>/bin/tick.py <RUN_DIR>`. Capture stdout.
 2. Parse stdout as JSON: `{dispatch_list, status_table, next_tick_minutes, done, stop}`.
 3. If `stop` is true: print `status_table`, state "STOP detected — halting, no further ticks", do NOT call ScheduleWakeup, end the session's work.
 4. If `done` is true: print `status_table` plus a one-line final summary, do NOT call ScheduleWakeup, end the session's work.
@@ -145,8 +145,8 @@ double-runs:
 - Re-paste `references/BOOTSTRAP_PROMPT.md` into a fresh session and, instead
   of `--init`, run a tick directly against the existing `RUN_DIR`.
 - Or run the printed floor command in a plain window:
-  `python3 <WAKECYCLE_REPO>/bin/ticker.py --once <RUN_DIR>` (one tick) or
-  `python3 <WAKECYCLE_REPO>/bin/ticker.py <RUN_DIR>` (loop until done).
+  `python3 <ARUNNER_REPO>/bin/ticker.py --once <RUN_DIR>` (one tick) or
+  `python3 <ARUNNER_REPO>/bin/ticker.py <RUN_DIR>` (loop until done).
 
 The two silent wakeup-drops observed in the wild (2026-06-11) are exactly
 why the printed floor command exists — print it whenever you reschedule so

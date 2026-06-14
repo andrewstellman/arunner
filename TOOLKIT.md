@@ -1,4 +1,4 @@
-# Wakecycle Toolkit
+# Arunner Toolkit
 
 > This file is for your AI assistant to read — not for you to read yourself.
 > Open it in Claude Code, Cursor, Copilot, or any AI coding tool and say:
@@ -38,15 +38,15 @@ a CI job, or anything that can write a line.
 ## Install (user-level, no admin)
 
 ```bash
-pip install --user wakecycle      # Python 3.10+
+pip install --user arunner      # Python 3.10+
 # or
-npm install wakecycle
+npm install arunner
 ```
 
 > **At 0.0.1 the package is a name reservation** — installing gives the
-> `wakecycle` placeholder command. Run the harness from this repo today with
+> `arunner` placeholder command. Run the harness from this repo today with
 > `python3 bin/tick.py` / `bin/ticker.py` / `bin/heartbeat.py`; the
-> `wakecycle-ticker` / `wakecycle-heartbeat` console commands wire up at v0.1.0
+> `arunner-ticker` / `arunner-heartbeat` console commands wire up at v0.1.0
 > (this manual uses those names).
 
 Nothing needs root. The only requirements are user-level Python 3.10+ and, if
@@ -71,12 +71,12 @@ size / cadence** if they care (else defaults).
 | The job is… | Use | Form |
 |---|---|---|
 | an AI agent working **inside this session** (rung 1) | `dispatch_mode: subagent` | a `prompt` |
-| a command **wakecycle launches** (test/build/script, any CLI) | `adapter: "wrap"` | a `command` |
+| a command **arunner launches** (test/build/script, any CLI) | `adapter: "wrap"` | a `command` |
 | a process **something else launches** that writes its own log | `adapter: "tail"` | a `log_path` (+ optional `success_regex`/`failure_regex`/`sentinel_file`) |
 | a host-CLI agent you invoke by argv yourself (advanced) | `dispatch_mode: shell` | a `worker_cmd` |
 
 Rule of thumb: **subagent** when this session does the work; **wrap** when
-wakecycle owns the launch; **tail** when something else does. Prefer `wrap`/
+arunner owns the launch; **tail** when something else does. Prefer `wrap`/
 `tail` over a hand-written `worker_cmd` — the adapter wires the heartbeat
 plumbing for you.
 
@@ -209,10 +209,10 @@ plan.
 An adapter makes a non-AI job a conformant worker with **no change to the
 command**:
 
-- **`wrap`** — wakecycle launches your `command` as a child, captures its
+- **`wrap`** — arunner launches your `command` as a child, captures its
   stdout+stderr, emits keepalives, and reports **COMPLETED/FAILED straight from
-  the exit code** (never by parsing output). Use when wakecycle owns the launch.
-- **`tail`** — wakecycle watches a `log_path` a job already writes, surfaces its
+  the exit code** (never by parsing output). Use when arunner owns the launch.
+- **`tail`** — arunner watches a `log_path` a job already writes, surfaces its
   latest line as the activity, and decides doneness by **precedence**: an
   optional `success_regex`/`failure_regex`/`sentinel_file` overlay (for jobs
   that signal only in their log), then the authoritative process exit (default
@@ -239,12 +239,12 @@ Ask, in order:
    drives the run. **Use `subagent` entries.** Keep the session open. *Pair
    with a safety tick (troubleshooting).*
 2. **No session, but you can add a cron/Task-Scheduler/launchd entry?**
-   Install the printed `wakecycle-ticker --once <run-dir>` schedule at the
+   Install the printed `arunner-ticker --once <run-dir>` schedule at the
    plan cadence. **Use `shell` entries.** No window stays open.
 3. **No scheduler rights (locked-down machine)?** Run
-   `wakecycle-ticker <plan.json>` in a terminal — the foreground loop. **Use
+   `arunner-ticker <plan.json>` in a terminal — the foreground loop. **Use
    `shell` entries.** The window stays open for the run.
-4. **Can't keep a window open?** Run `wakecycle-ticker --once <run-dir>` by
+4. **Can't keep a window open?** Run `arunner-ticker --once <run-dir>` by
    hand whenever convenient; each call is one safe tick. Every failure path
    prints this exact command.
 
@@ -277,9 +277,9 @@ in-context tasks themselves.
 Rung 1: paste the bootstrap, watch the table each tick. Rung 3:
 
 ```bash
-wakecycle-ticker path/to/plan.json     # loop: --init, then tick -> spawn -> sleep -> repeat
-wakecycle-ticker path/to/run-dir       # resume an existing run (loop)
-wakecycle-ticker --once path/to/run-dir  # exactly one tick (cron / manual floor)
+arunner-ticker path/to/plan.json     # loop: --init, then tick -> spawn -> sleep -> repeat
+arunner-ticker path/to/run-dir       # resume an existing run (loop)
+arunner-ticker --once path/to/run-dir  # exactly one tick (cron / manual floor)
 ```
 
 The table:
@@ -315,9 +315,9 @@ Next tick in M min
   on their own (no kill this release). Delete `STOP` and tick to continue.
 - **Resume after a crash / closed window / slept machine:** point a fresh
   session at the existing run directory (skip `--init`), or run
-  `wakecycle-ticker --once <run-dir>`. Disk state resumes; nothing
+  `arunner-ticker --once <run-dir>`. Disk state resumes; nothing
   double-runs.
-- **Manual ticks:** `wakecycle-ticker --once <run-dir>` as often as you like —
+- **Manual ticks:** `arunner-ticker --once <run-dir>` as often as you like —
   over-ticking is harmless (cycle-only).
 
 ## The worker contract — for custom (non-AI) jobs
@@ -338,9 +338,9 @@ per file). Lines are schema v2:
 **With the helper (convenience):**
 
 ```bash
-wakecycle-heartbeat emit      --task-id <id> --heartbeat-path <p> --label build --status IN_PROGRESS [--message ...] [--data '{"k":"v"}']
-wakecycle-heartbeat keepalive --task-id <id> --heartbeat-path <p>      # re-pings the last label
-wakecycle-heartbeat terminal  --task-id <id> --heartbeat-path <p> --status COMPLETED --result-file <f> --summary "done"
+arunner-heartbeat emit      --task-id <id> --heartbeat-path <p> --label build --status IN_PROGRESS [--message ...] [--data '{"k":"v"}']
+arunner-heartbeat keepalive --task-id <id> --heartbeat-path <p>      # re-pings the last label
+arunner-heartbeat terminal  --task-id <id> --heartbeat-path <p> --status COMPLETED --result-file <f> --summary "done"
 ```
 
 The helper JSON-encodes every value (so `%`, `"`, `\` in a field can't
@@ -359,7 +359,7 @@ skips a malformed line with a warning rather than dying.
 - **The loop went silent (rung 1).** This is the Class-C in-session failure:
   the wakeup fired but the resumed turn mis-serialized its first action and
   ended without rescheduling. **Fix:** deploy a **safety tick** — a
-  cron/scheduler or second terminal running `wakecycle-ticker --once <run-dir>`
+  cron/scheduler or second terminal running `arunner-ticker --once <run-dir>`
   at ~3× the plan cadence against the same run-dir. It's a no-op while the
   loop is healthy and rescues it within one interval if the turn dies. To
   resume right now, just run that command once. (Tracking:

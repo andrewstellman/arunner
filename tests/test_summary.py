@@ -5,7 +5,7 @@ On the TRANSITION into done, the engine writes SUMMARY.md (human) + summary.json
 records. The load-bearing guard: a post-done idempotent re-tick stays cycle-only
 (FR-6) -- an already-done run with SUMMARY present is NOT rewritten.
 
-The clock seam (WAKECYCLE_NOW) makes durations deterministic without sleeping.
+The clock seam (ARUNNER_NOW) makes durations deterministic without sleeping.
 
 MUTATION-VERIFY EVIDENCE (DEVELOPMENT_PROCESS Mutation-test), instr 029:
   Pin: test_retick_after_done_is_cycle_only.
@@ -43,13 +43,13 @@ class _Base(unittest.TestCase):
         self._n = 0
 
     def tearDown(self):
-        os.environ.pop("WAKECYCLE_RUNS_DIR", None)
-        os.environ.pop("WAKECYCLE_NOW", None)
+        os.environ.pop("ARUNNER_RUNS_DIR", None)
+        os.environ.pop("ARUNNER_NOW", None)
         self._tmp.cleanup()
 
     def _fresh(self, n=1):
         self._n += 1
-        os.environ["WAKECYCLE_RUNS_DIR"] = str(self.tmp / ("runs%d" % self._n))
+        os.environ["ARUNNER_RUNS_DIR"] = str(self.tmp / ("runs%d" % self._n))
         entries = [{"task_id": "t%d" % i, "target_repo": "/tmp",
                     "dispatch_mode": "subagent", "worker_prompt": "x"}
                    for i in range(n)]
@@ -69,11 +69,11 @@ class _Base(unittest.TestCase):
 
     def _drive_to_done(self, n=1):
         rd = self._fresh(n)
-        os.environ["WAKECYCLE_NOW"] = "1000000000"      # dispatch tick -> claimed_at
+        os.environ["ARUNNER_NOW"] = "1000000000"      # dispatch tick -> claimed_at
         T.tick(rd)
         for i in range(n):
             self._complete(rd, "run-%02d" % (i + 1), "t%d" % i)
-        os.environ["WAKECYCLE_NOW"] = "1000000005"      # reap tick -> reaped_ts (+5s)
+        os.environ["ARUNNER_NOW"] = "1000000005"      # reap tick -> reaped_ts (+5s)
         out = T.tick(rd)
         return rd, out
 
@@ -107,7 +107,7 @@ class SummaryWriteTests(_Base):
         before_json = (rd / "summary.json").read_bytes()
         before_md = (rd / "SUMMARY.md").read_bytes()
         cycle_before = self._status(rd)["cycle"]
-        os.environ["WAKECYCLE_NOW"] = "1000000099"           # later clock
+        os.environ["ARUNNER_NOW"] = "1000000099"           # later clock
         T.tick(rd)                                           # redundant re-tick
         # SUMMARY is NOT rewritten (would change generated_ts if it were)
         self.assertEqual((rd / "summary.json").read_bytes(), before_json)
@@ -119,17 +119,17 @@ class SummaryWriteTests(_Base):
         rd, _ = self._drive_to_done(n=1)
         (rd / "SUMMARY.md").unlink()
         (rd / "summary.json").unlink()
-        os.environ["WAKECYCLE_NOW"] = "1000000200"
+        os.environ["ARUNNER_NOW"] = "1000000200"
         T.tick(rd)                                           # done + absent -> backfill
         self.assertTrue((rd / "SUMMARY.md").is_file())
         self.assertTrue((rd / "summary.json").is_file())
 
     def test_not_written_before_done(self):
         rd = self._fresh(n=2)
-        os.environ["WAKECYCLE_NOW"] = "1000000000"
+        os.environ["ARUNNER_NOW"] = "1000000000"
         T.tick(rd)                                           # dispatch only, not done
         self._complete(rd, "run-01", "t0")
-        os.environ["WAKECYCLE_NOW"] = "1000000005"
+        os.environ["ARUNNER_NOW"] = "1000000005"
         out = T.tick(rd)                                     # one of two reaped, NOT done
         self.assertFalse(out["done"])
         self.assertFalse((rd / "SUMMARY.md").exists())

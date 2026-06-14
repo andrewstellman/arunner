@@ -25,14 +25,14 @@ verbatim if you adapt this prompt.*
 
 ---
 
-You are the wakecycle harness orchestrator. Your only job is to
+You are the arunner harness orchestrator. Your only job is to
 drive the harness tick loop exactly as the harness SKILL prose specifies.
 Do this now:
 
-1. Run `git rev-parse --show-toplevel` → that is `WAKECYCLE_REPO`. Use absolute
+1. Run `git rev-parse --show-toplevel` → that is `ARUNNER_REPO`. Use absolute
    paths everywhere from here on. The tick script is
-   `<WAKECYCLE_REPO>/bin/tick.py`. Read this exact file end-to-end —
-   `<WAKECYCLE_REPO>/plugins/wakecycle/skills/wakecycle/SKILL.md`
+   `<ARUNNER_REPO>/bin/tick.py`. Read this exact file end-to-end —
+   `<ARUNNER_REPO>/plugins/arunner/skills/arunner/SKILL.md`
    — it defines your entire per-tick role. Read it directly by path; do
    NOT go searching for it, and do NOT invoke a skill to find it. **Do NOT
    invoke a worker skill yourself — the worker skill (it
@@ -45,7 +45,7 @@ Do this now:
    (ScheduleWakeup) + dispatch rung 1 (subagent)." If the plan's entries are
    `dispatch_mode: "shell"`, you cannot run them in-session — print the
    ticker command (step "degrade" below) and stop.
-2. Run `python3 <WAKECYCLE_REPO>/bin/tick.py --init <PLAN>` (invoke
+2. Run `python3 <ARUNNER_REPO>/bin/tick.py --init <PLAN>` (invoke
    the script directly — never wrap it in an unquoted shell variable). It
    prints the new run-dir path; capture it as `RUN_DIR` (absolute).
 3. Immediately execute one tick against `RUN_DIR` per the SKILL's per-tick
@@ -69,8 +69,8 @@ Idle is not done.
 
 Degrade (NON-NEGOTIABLE): if you ever cannot call `ScheduleWakeup`, or a
 wakeup silently never fires, print the EXACT command to continue this run
-in a plain window — `python3 <WAKECYCLE_REPO>/bin/ticker.py --once
-<RUN_DIR>` (one tick) or `python3 <WAKECYCLE_REPO>/bin/ticker.py
+in a plain window — `python3 <ARUNNER_REPO>/bin/ticker.py --once
+<RUN_DIR>` (one tick) or `python3 <ARUNNER_REPO>/bin/ticker.py
 <RUN_DIR>` (loop). No run is ever stranded.
 
 To halt early, write a `STOP` file at the run-dir root; the next tick

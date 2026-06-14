@@ -1,8 +1,8 @@
 {
   "$schema": "http://json-schema.org/draft-07/schema#",
-  "$id": "https://github.com/andrewstellman/wakecycle/schemas/heartbeat.schema.json",
+  "$id": "https://github.com/andrewstellman/arunner/schemas/heartbeat.schema.json",
   "title": "Harness heartbeat line",
-  "description": "One JSON object per line in heartbeat.ndjson. The worker contract (FR-18): a job is anything that appends these lines to a file. `status` is the ONLY field the harness interprets (it drives the state machine); everything else is decoration the harness displays but never reads. `label` is a single short free-form string shown verbatim in the status table (column ACTIVITY; truncated to width and ASCII-sanitized for DISPLAY only, raw preserved on disk) — it replaces the v1 `phase`/`step` pair. `data` is an opaque JSON object the harness never reads (the structure escape hatch / A2A path). schema_version is '2'; the harness honors Postel's law and still reads v1 lines (`phase`/`step`, schema_version '1') — be conservative in what it emits, liberal in what it accepts; a malformed line is skipped with a warning, never fatal. a vendored integration sets `label` from its own phase identity (e.g. '2:generation') and carries the old step under `data.step`; that coupling never enters the generic core. This file is byte-identical to plugins/wakecycle/skills/wakecycle/schemas/heartbeat.schema.json — the cross-skill byte-equality contract is load-bearing (Council C-3 silent-drift risk) and pinned by tests/test_schemas.py.",
+  "description": "One JSON object per line in heartbeat.ndjson. The worker contract (FR-18): a job is anything that appends these lines to a file. `status` is the ONLY field the harness interprets (it drives the state machine); everything else is decoration the harness displays but never reads. `label` is a single short free-form string shown verbatim in the status table (column ACTIVITY; truncated to width and ASCII-sanitized for DISPLAY only, raw preserved on disk) — it replaces the v1 `phase`/`step` pair. `data` is an opaque JSON object the harness never reads (the structure escape hatch / A2A path). schema_version is '2'; the harness honors Postel's law and still reads v1 lines (`phase`/`step`, schema_version '1') — be conservative in what it emits, liberal in what it accepts; a malformed line is skipped with a warning, never fatal. a vendored integration sets `label` from its own phase identity (e.g. '2:generation') and carries the old step under `data.step`; that coupling never enters the generic core. This file is byte-identical to plugins/arunner/skills/arunner/schemas/heartbeat.schema.json — the cross-skill byte-equality contract is load-bearing (Council C-3 silent-drift risk) and pinned by tests/test_schemas.py.",
   "type": "object",
   "required": ["ts", "task_id", "schema_version", "status"],
   "properties": {
@@ -12,7 +12,7 @@
     },
     "task_id": {
       "type": "string",
-      "description": "Task id matching the job manifest. Threaded from the worker prompt header (TASK_ID=<id>) or env var HARNESS_TASK_ID / WAKECYCLE_TASK_ID."
+      "description": "Task id matching the job manifest. Threaded from the worker prompt header (TASK_ID=<id>) or env var HARNESS_TASK_ID / ARUNNER_TASK_ID."
     },
     "schema_version": {
       "type": "string",

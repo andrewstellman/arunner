@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""wakecycle in-context worker mode (FR-46..49) -- the DETERMINISTIC core.
+"""arunner in-context worker mode (FR-46..49) -- the DETERMINISTIC core.
 
 In-context is the THIRD dispatch mode (FR-46), orthogonal to cadence: alongside
 subagent (FR-14) and shell (FR-15), the orchestrator MAY do a task itself, in

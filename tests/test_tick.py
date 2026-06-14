@@ -6,7 +6,7 @@ stall detection, AUTH_OR_LAUNCH_FAILED, terminal-tick cosmetics,
 double-tick idempotency, STOP read-only, and the JSON output shape.
 
 Time-dependent transitions (stall, launch grace) are driven by the
-WAKECYCLE_NOW env override the script reads, so no test sleeps.
+ARUNNER_NOW env override the script reads, so no test sleeps.
 
 MUTATION-VERIFY EVIDENCE (in-tree per DEVELOPMENT_PROCESS.md §Mutation-
 test discipline), v1.5.9 instruction 005 — regression pins BITE-executed:
@@ -95,12 +95,12 @@ class _Base(unittest.TestCase):
         self._tmp = tempfile.TemporaryDirectory()
         self.tmp = Path(self._tmp.name)
         # Keep all run-dirs hermetic inside the tmp dir.
-        os.environ["WAKECYCLE_RUNS_DIR"] = str(self.tmp / "harness_runs")
-        os.environ.pop("WAKECYCLE_NOW", None)
+        os.environ["ARUNNER_RUNS_DIR"] = str(self.tmp / "harness_runs")
+        os.environ.pop("ARUNNER_NOW", None)
 
     def tearDown(self):
-        os.environ.pop("WAKECYCLE_NOW", None)
-        os.environ.pop("WAKECYCLE_RUNS_DIR", None)
+        os.environ.pop("ARUNNER_NOW", None)
+        os.environ.pop("ARUNNER_RUNS_DIR", None)
         self._tmp.cleanup()
 
     def _init(self, plan):
@@ -222,7 +222,7 @@ class StallTests(_Base):
         self.assertEqual(_status(rd)["runs"]["run-01"]["state"], "running")
         # jump the clock 46 minutes past the heartbeat mtime
         future = (rd / "run-01" / "heartbeat.ndjson").stat().st_mtime + 46 * 60
-        os.environ["WAKECYCLE_NOW"] = str(future)
+        os.environ["ARUNNER_NOW"] = str(future)
         T.tick(rd)
         self.assertEqual(_status(rd)["runs"]["run-01"]["state"], "stalled")
 
@@ -233,12 +233,12 @@ class StallTests(_Base):
         _hb(rd, "run-01", ts="t", task_id="t-1", schema_version="1",
             status="IN_PROGRESS")
         future = (rd / "run-01" / "heartbeat.ndjson").stat().st_mtime + 46 * 60
-        os.environ["WAKECYCLE_NOW"] = str(future)
+        os.environ["ARUNNER_NOW"] = str(future)
         T.tick(rd)
         self.assertEqual(_status(rd)["runs"]["run-01"]["state"], "stalled")
         # fresh heartbeat written "now" on the fake clock: in a real run the
         # file mtime IS the worker's write time, so set it to the fake now.
-        os.environ["WAKECYCLE_NOW"] = str(future + 60)
+        os.environ["ARUNNER_NOW"] = str(future + 60)
         _hb(rd, "run-01", ts="t", task_id="t-1", schema_version="1",
             status="IN_PROGRESS")
         os.utime(rd / "run-01" / "heartbeat.ndjson", (future + 60, future + 60))
@@ -251,11 +251,11 @@ class LaunchFailureTests(_Base):
         rd = self._init(_plan([_entry("t-1")], pool_size=1,
                               launch_grace_minutes=10))
         # dispatch at a fixed clock
-        os.environ["WAKECYCLE_NOW"] = "1000000"
+        os.environ["ARUNNER_NOW"] = "1000000"
         T.tick(rd)
         self.assertEqual(_status(rd)["runs"]["run-01"]["state"], "claimed")
         # 11 minutes later, still no heartbeat → launch failed
-        os.environ["WAKECYCLE_NOW"] = str(1000000 + 11 * 60)
+        os.environ["ARUNNER_NOW"] = str(1000000 + 11 * 60)
         out = T.tick(rd)
         s = _status(rd)
         self.assertEqual(s["runs"]["run-01"]["state"], "auth_or_launch_failed")
@@ -274,7 +274,7 @@ class HardeningTests(_Base):
         # claimed_at, and grace then applies from that point.
         rd = self._init(_plan([_entry("t-1")], pool_size=1,
                               launch_grace_minutes=10))
-        os.environ["WAKECYCLE_NOW"] = "1000000"
+        os.environ["ARUNNER_NOW"] = "1000000"
         T.tick(rd)  # claim run-01
         # corrupt: drop claimed_at
         s = _status(rd)
@@ -286,7 +286,7 @@ class HardeningTests(_Base):
         self.assertEqual(s["runs"]["run-01"]["state"], "claimed")
         self.assertEqual(s["runs"]["run-01"]["claimed_at"], 1000000)
         # 11 min later, still no heartbeat → grace now applies → failed
-        os.environ["WAKECYCLE_NOW"] = str(1000000 + 11 * 60)
+        os.environ["ARUNNER_NOW"] = str(1000000 + 11 * 60)
         T.tick(rd)
         self.assertEqual(_status(rd)["runs"]["run-01"]["state"],
                          "auth_or_launch_failed")
@@ -301,7 +301,7 @@ class HardeningTests(_Base):
         _hb(rd, "run-01", ts="t", task_id="t-1", schema_version="1",
             status="IN_PROGRESS")
         future = (rd / "run-01" / "heartbeat.ndjson").stat().st_mtime + 46 * 60
-        os.environ["WAKECYCLE_NOW"] = str(future)
+        os.environ["ARUNNER_NOW"] = str(future)
         T.tick(rd)
         self.assertEqual(_status(rd)["runs"]["run-01"]["state"], "stalled")
         # force mtime=None by monkeypatching _hb_observe for one tick
@@ -385,7 +385,7 @@ class WallClockJumpE2Tests(_Base):
     def test_wall_clock_jump_suppresses_stall(self):
         rd = self._init(_plan([_entry("t-1")], pool_size=1,
                               stall_threshold_minutes=45))
-        os.environ["WAKECYCLE_NOW"] = "1000000"
+        os.environ["ARUNNER_NOW"] = "1000000"
         T.tick(rd)
         hb = rd / "run-01" / "heartbeat.ndjson"
         _hb(rd, "run-01", ts="t", task_id="t-1", schema_version="1",
@@ -393,7 +393,7 @@ class WallClockJumpE2Tests(_Base):
         os.utime(hb, (1000000, 1000000))
         T.tick(rd)  # running; stores last_tick_wall=1000000
         # jump 10h forward — heartbeat age is now huge but it's a sleep jump
-        os.environ["WAKECYCLE_NOW"] = str(1000000 + 10 * 3600)
+        os.environ["ARUNNER_NOW"] = str(1000000 + 10 * 3600)
         T.tick(rd)
         self.assertEqual(_status(rd)["runs"]["run-01"]["state"], "running")
 
@@ -401,7 +401,7 @@ class WallClockJumpE2Tests(_Base):
         # control: a stale heartbeat WITHOUT a wall-clock jump still stalls
         rd = self._init(_plan([_entry("t-1")], pool_size=1,
                               stall_threshold_minutes=45))
-        os.environ["WAKECYCLE_NOW"] = "2000000"
+        os.environ["ARUNNER_NOW"] = "2000000"
         T.tick(rd)
         hb = rd / "run-01" / "heartbeat.ndjson"
         _hb(rd, "run-01", ts="t", task_id="t-1", schema_version="1",
@@ -409,7 +409,7 @@ class WallClockJumpE2Tests(_Base):
         os.utime(hb, (2000000, 2000000))
         T.tick(rd)
         # +50 min: > stall threshold but a normal-sized gap (no jump)
-        os.environ["WAKECYCLE_NOW"] = str(2000000 + 50 * 60)
+        os.environ["ARUNNER_NOW"] = str(2000000 + 50 * 60)
         T.tick(rd)
         self.assertEqual(_status(rd)["runs"]["run-01"]["state"], "stalled")
 
@@ -630,9 +630,9 @@ class LaunchFailDisplayTests(_Base):
     def test_launch_fail_abbreviated_and_hint_in_table(self):
         rd = self._init(_plan([_entry("t-1")], pool_size=1,
                               launch_grace_minutes=10))
-        os.environ["WAKECYCLE_NOW"] = "1000000"
+        os.environ["ARUNNER_NOW"] = "1000000"
         T.tick(rd)
-        os.environ["WAKECYCLE_NOW"] = str(1000000 + 11 * 60)
+        os.environ["ARUNNER_NOW"] = str(1000000 + 11 * 60)
         out = T.tick(rd)
         tbl = out["status_table"]
         self.assertIn("LAUNCH-FAIL", tbl)
@@ -645,9 +645,9 @@ class LaunchFailDisplayTests(_Base):
     def test_table_columns_do_not_overflow(self):
         rd = self._init(_plan([_entry("t-1")], pool_size=1,
                               launch_grace_minutes=10))
-        os.environ["WAKECYCLE_NOW"] = "1000000"
+        os.environ["ARUNNER_NOW"] = "1000000"
         T.tick(rd)
-        os.environ["WAKECYCLE_NOW"] = str(1000000 + 11 * 60)
+        os.environ["ARUNNER_NOW"] = str(1000000 + 11 * 60)
         out = T.tick(rd)
         # the data row's STATE field is bounded — find the run-01 row and
         # assert the abbreviated state sits in its 13-wide column.

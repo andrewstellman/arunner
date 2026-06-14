@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""wakecycle heartbeat  -  the payload-agnostic heartbeat emit helper.
+"""arunner heartbeat  -  the payload-agnostic heartbeat emit helper.
 
 The generic heartbeat surface (FR-18..21): ``label`` is a FREE STRING
 (FR-18) with no coupling to any particular payload  -  this helper is the
@@ -37,7 +37,7 @@ guidance: on a nonzero heartbeat exit, abort the job with a FAILED
 terminal (the orchestrator will reap it as failed rather than stall).
 
 Mode A: when neither ``--heartbeat-path`` / ``HARNESS_HEARTBEAT_PATH`` /
-``WAKECYCLE_HEARTBEAT_PATH`` nor ``--task-id`` / the TASK_ID env is set AND
+``ARUNNER_HEARTBEAT_PATH`` nor ``--task-id`` / the TASK_ID env is set AND
 ``--mode-a-noop`` is passed, the call silently exits 0.
 
 Exit codes: 0 ok / mode-A no-op; 2 missing heartbeat-path or task-id;
@@ -58,21 +58,21 @@ from pathlib import Path
 from typing import Optional
 
 
-_NAME = "wakecycle-heartbeat"
+_NAME = "arunner-heartbeat"
 _PROGRESS_STATES = ("STARTING", "IN_PROGRESS", "COMPLETED", "FAILED")
 _TERMINAL_STATES = ("COMPLETED", "FAILED", "ABANDONED")
 SCHEMA_VERSION = "2"
 
 # Env aliases (either name works).
-_HB_ENV = ("WAKECYCLE_HEARTBEAT_PATH", "HARNESS_HEARTBEAT_PATH")
-_TID_ENV = ("WAKECYCLE_TASK_ID", "HARNESS_TASK_ID")
+_HB_ENV = ("ARUNNER_HEARTBEAT_PATH", "HARNESS_HEARTBEAT_PATH")
+_TID_ENV = ("ARUNNER_TASK_ID", "HARNESS_TASK_ID")
 
 
 def _utc_iso() -> str:
-    # Clock seam (instr 018): mirror the tick engine's WAKECYCLE_NOW override
+    # Clock seam (instr 018): mirror the tick engine's ARUNNER_NOW override
     # (epoch float) so heartbeat timestamps -- and the future wrap-adapter
     # keepalive cadence (Iteration 7) -- are unit-testable without sleeping.
-    override = os.environ.get("WAKECYCLE_NOW")
+    override = os.environ.get("ARUNNER_NOW")
     if override:
         try:
             return datetime.fromtimestamp(
@@ -236,7 +236,7 @@ def _cmd_terminal(args) -> int:
 
 
 # --- FR-40 wrap-and-run adapter ---------------------------------------------
-# `wrap` turns ANY command into a conformant wakecycle job with no change to
+# `wrap` turns ANY command into a conformant arunner job with no change to
 # the command: it launches the command as its OWN CHILD (the adapter is the
 # parent), redirects the child's stdout+stderr to a capture file it owns and
 # tails, emits STARTING at launch, IN_PROGRESS keepalives on a TIMER-DRIVEN
@@ -276,9 +276,9 @@ def _pid_alive(pid: int) -> bool:
 
 
 def _now() -> float:
-    """Wall-clock epoch seconds, honoring the WAKECYCLE_NOW seam (instr 018) so
+    """Wall-clock epoch seconds, honoring the ARUNNER_NOW seam (instr 018) so
     the keepalive cadence is unit-testable without real sleeps."""
-    override = os.environ.get("WAKECYCLE_NOW")
+    override = os.environ.get("ARUNNER_NOW")
     if override:
         try:
             return float(override)

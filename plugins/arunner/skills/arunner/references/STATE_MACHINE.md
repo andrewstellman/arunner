@@ -1,4 +1,4 @@
-# wakecycle harness state machine
+# arunner harness state machine
 
 The authoritative description of the per-run state machine that
 `bin/tick.py` advances each tick. The orchestrator agent
@@ -208,7 +208,7 @@ ask a model to copy or substitute a literal path: in run
 `20260612T005833Z` a hand-copied helper path was transcribed as
 `/Users/anthropic/...` (username hallucinated), silently killing every
 heartbeat while the job "completed" invisibly. The `<...>` notation that
-survives in the **operator** bootstrap (`<PLAN>`, `<WAKECYCLE_REPO>`, `<RUN_DIR>`)
+survives in the **operator** bootstrap (`<PLAN>`, `<ARUNNER_REPO>`, `<RUN_DIR>`)
 is operator-supplied input or a value captured mechanically from command
 output (`git rev-parse`, `--init`), never a path a model retypes.
 

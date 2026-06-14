@@ -1,7 +1,7 @@
 """instr 018 — the injectable clock seam exists on BOTH time surfaces.
 
 The deterministic core is unit-testable because time is injectable, not read
-from the wall clock. The tick engine already honors ``WAKECYCLE_NOW`` (epoch
+from the wall clock. The tick engine already honors ``ARUNNER_NOW`` (epoch
 float) for stall / wall-clock-jump logic (FR-8); instruction 018 adds the
 mirror to the heartbeat surface so the future wrap-adapter keepalive cadence
 (Iteration 7) and in-context timing (Iteration 12) are red/green-able without
@@ -27,14 +27,14 @@ def _load(name, rel):
 class ClockSeamTests(unittest.TestCase):
 
     def setUp(self):
-        self._saved = os.environ.get("WAKECYCLE_NOW")
-        os.environ["WAKECYCLE_NOW"] = "1000000000"  # 2001-09-09T01:46:40Z
+        self._saved = os.environ.get("ARUNNER_NOW")
+        os.environ["ARUNNER_NOW"] = "1000000000"  # 2001-09-09T01:46:40Z
 
     def tearDown(self):
         if self._saved is None:
-            os.environ.pop("WAKECYCLE_NOW", None)
+            os.environ.pop("ARUNNER_NOW", None)
         else:
-            os.environ["WAKECYCLE_NOW"] = self._saved
+            os.environ["ARUNNER_NOW"] = self._saved
 
     def test_engine_now_honors_seam(self):
         tk = _load("tk_seam", "bin/tick.py")
@@ -45,7 +45,7 @@ class ClockSeamTests(unittest.TestCase):
         self.assertEqual(hb._utc_iso(), "2001-09-09T01:46:40Z")
 
     def test_heartbeat_falls_back_when_unset(self):
-        os.environ.pop("WAKECYCLE_NOW", None)
+        os.environ.pop("ARUNNER_NOW", None)
         hb = _load("hb_seam2", "bin/heartbeat.py")
         # real now -- just assert it's a well-formed Zulu stamp, not the frozen one
         ts = hb._utc_iso()

@@ -1,6 +1,6 @@
 # Instruction 030 self-Council synthesis — Iteration 12: in-context worker mode (FR-46..49)
 
-*Mandatory 3-panel worker self-Council (the last feature iteration; the only piece whose core is agent behavior, so honesty-sensitive). Three independent fresh-context panelists, role-locked, live-verified; mutation bites used scratch copies — the real source was never mutated. Synthesized by the runner worker. Date: 2026-06-13. Committed into the wakecycle repo at `reviews/030_self_council/`.*
+*Mandatory 3-panel worker self-Council (the last feature iteration; the only piece whose core is agent behavior, so honesty-sensitive). Three independent fresh-context panelists, role-locked, live-verified; mutation bites used scratch copies — the real source was never mutated. Synthesized by the runner worker. Date: 2026-06-13. Committed into the arunner repo at `reviews/030_self_council/`.*
 
 ## Panelist verdicts
 | Panelist | Charter | Verdict |

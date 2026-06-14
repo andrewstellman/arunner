@@ -152,7 +152,7 @@ class HonestyTests(unittest.TestCase):
     _DOCS = {
         "README.md": _ROOT / "README.md",
         "TOOLKIT.md": _ROOT / "TOOLKIT.md",
-        "SKILL.md": _ROOT / "plugins/wakecycle/skills/wakecycle/SKILL.md",
+        "SKILL.md": _ROOT / "plugins/arunner/skills/arunner/SKILL.md",
         "incontext.py": _ROOT / "bin/incontext.py",
     }
 

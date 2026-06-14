@@ -10,7 +10,7 @@ its steps are done (the complete-on-launch behaviour the simple scenarios use).
 
 It appends raw single-line JSON heartbeats with the standard library only --
 no dependency on bin/heartbeat.py -- which also exercises the no-helper worker
-contract. Honours WAKECYCLE_NOW for the timestamp (the clock seam).
+contract. Honours ARUNNER_NOW for the timestamp (the clock seam).
 """
 from __future__ import annotations
 
@@ -23,7 +23,7 @@ from datetime import datetime, timezone
 
 
 def _ts() -> str:
-    override = os.environ.get("WAKECYCLE_NOW")
+    override = os.environ.get("ARUNNER_NOW")
     if override:
         try:
             return datetime.fromtimestamp(

@@ -1,10 +1,10 @@
 """FR-51 mechanically-enforced independence: the integration checker imports
-the STANDARD LIBRARY ONLY -- never the ``wakecycle`` package, never a ``bin/``
+the STANDARD LIBRARY ONLY -- never the ``arunner`` package, never a ``bin/``
 module. "The harness never grades its own homework" must stay true as the
 suite grows; this AST scan makes a violation fail loudly the moment it lands
 (cheap now, effectively impossible to retrofit later).
 
-MUTATION-VERIFY EVIDENCE (instr 018): adding ``import wakecycle`` (or
+MUTATION-VERIFY EVIDENCE (instr 018): adding ``import arunner`` (or
 ``from bin import tick``) to checker.py makes this test FAIL; removing it ->
 OK. Demonstrated in outputs/018.
 """
@@ -17,7 +17,7 @@ from pathlib import Path
 
 _CHECKER = (Path(__file__).resolve().parents[1] / "tests" / "integration"
             / "checker.py")
-_BANNED = {"wakecycle", "tick", "ticker", "heartbeat", "demo_worker", "bin"}
+_BANNED = {"arunner", "tick", "ticker", "heartbeat", "demo_worker", "bin"}
 
 
 def _imported_top_modules(src_path):

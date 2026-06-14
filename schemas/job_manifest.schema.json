@@ -1,7 +1,7 @@
 {
   "$schema": "http://json-schema.org/draft-07/schema#",
-  "$id": "https://github.com/andrewstellman/wakecycle/schemas/harness/job_manifest.schema.json",
-  "title": "wakecycle harness job manifest",
+  "$id": "https://github.com/andrewstellman/arunner/schemas/harness/job_manifest.schema.json",
+  "title": "arunner harness job manifest",
   "description": "Per-run manifest written by `tick.py --init` to run-NN/manifest.json. The queue/ and claimed/ job-NNNNN.json files wrap a plan entry under {job_id, run, entry}; this schema describes the run-NN/manifest.json projection the harness and any monitor read.",
   "type": "object",
   "required": ["task_id", "target_repo", "dispatch_mode", "run", "job_id"],

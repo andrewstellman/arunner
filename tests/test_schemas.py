@@ -21,7 +21,7 @@ from pathlib import Path
 _REPO_ROOT = Path(__file__).resolve().parents[1]
 _WORKER_SCHEMA = _REPO_ROOT / "schemas" / "heartbeat.schema.json"
 _HARNESS_SCHEMA = (
-    _REPO_ROOT / "plugins" / "wakecycle" / "skills" / "wakecycle"
+    _REPO_ROOT / "plugins" / "arunner" / "skills" / "arunner"
     / "schemas" / "heartbeat.schema.json")
 
 

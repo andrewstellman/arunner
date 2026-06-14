@@ -52,8 +52,8 @@ class GenericHeartbeatTests(unittest.TestCase):
     def setUp(self):
         self._tmp = tempfile.TemporaryDirectory()
         self.hb = Path(self._tmp.name) / "heartbeat.ndjson"
-        for k in ("HARNESS_HEARTBEAT_PATH", "WAKECYCLE_HEARTBEAT_PATH",
-                  "HARNESS_TASK_ID", "WAKECYCLE_TASK_ID"):
+        for k in ("HARNESS_HEARTBEAT_PATH", "ARUNNER_HEARTBEAT_PATH",
+                  "HARNESS_TASK_ID", "ARUNNER_TASK_ID"):
             os.environ.pop(k, None)
 
     def tearDown(self):

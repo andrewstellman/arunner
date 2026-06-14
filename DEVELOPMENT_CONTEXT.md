@@ -1,4 +1,4 @@
-# Wakecycle — Development Context
+# Arunner — Development Context
 
 *Read this once to bootstrap a fresh development chat to full context. It is
 a projection of `docs/REQUIREMENTS.md` (the spec) plus the history and the

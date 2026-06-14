@@ -47,12 +47,12 @@ class _Base(unittest.TestCase):
         self._n = 0
 
     def tearDown(self):
-        os.environ.pop("WAKECYCLE_RUNS_DIR", None)
+        os.environ.pop("ARUNNER_RUNS_DIR", None)
         self._tmp.cleanup()
 
     def _fresh(self, n=2, pool=1):
         self._n += 1
-        os.environ["WAKECYCLE_RUNS_DIR"] = str(self.tmp / ("runs%d" % self._n))
+        os.environ["ARUNNER_RUNS_DIR"] = str(self.tmp / ("runs%d" % self._n))
         entries = [{"task_id": "t%d" % i, "target_repo": "/tmp",
                     "dispatch_mode": "subagent", "worker_prompt": "x"}
                    for i in range(n)]

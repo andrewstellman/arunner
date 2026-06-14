@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""wakecycle demo_worker  -  cross-platform demo/stub worker.
+"""arunner demo_worker  -  cross-platform demo/stub worker.
 
 The payload-agnostic stub the example plan dispatches (FR-31 / UC-8 demo;
 a Python stub so the demo runs identically on Windows, macOS, and Linux  -
@@ -11,7 +11,7 @@ demonstrated with zero API spend.
 
 Reads its identity from the absolute-path block the harness substitutes
 (env HARNESS_HEARTBEAT_PATH / HARNESS_TASK_ID / HARNESS_RUN_DIR, or the
-WAKECYCLE_* aliases, or --flags). Emits via the sibling heartbeat helper
+ARUNNER_* aliases, or --flags). Emits via the sibling heartbeat helper
 (imported from the same directory). Honours E6: if a heartbeat write
 fails, it aborts loudly with a FAILED terminal rather than looking healthy.
 
@@ -64,9 +64,9 @@ def main(argv=None) -> int:
     args = ap.parse_args(list(sys.argv[1:] if argv is None else argv))
 
     hb_path = args.heartbeat_path or _env(
-        "HARNESS_HEARTBEAT_PATH", "WAKECYCLE_HEARTBEAT_PATH")
-    task_id = args.task_id or _env("HARNESS_TASK_ID", "WAKECYCLE_TASK_ID")
-    run_dir = args.run_dir or _env("HARNESS_RUN_DIR", "WAKECYCLE_RUN_DIR")
+        "HARNESS_HEARTBEAT_PATH", "ARUNNER_HEARTBEAT_PATH")
+    task_id = args.task_id or _env("HARNESS_TASK_ID", "ARUNNER_TASK_ID")
+    run_dir = args.run_dir or _env("HARNESS_RUN_DIR", "ARUNNER_RUN_DIR")
     if not hb_path or not task_id:
         print("harness_demo_worker: need --heartbeat-path and --task-id "
               "(or the env block)", file=sys.stderr)

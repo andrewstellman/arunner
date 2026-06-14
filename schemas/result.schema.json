@@ -1,7 +1,7 @@
 {
   "$schema": "http://json-schema.org/draft-07/schema#",
-  "$id": "https://github.com/andrewstellman/wakecycle/schemas/harness/result.schema.json",
-  "title": "wakecycle harness result record",
+  "$id": "https://github.com/andrewstellman/arunner/schemas/harness/result.schema.json",
+  "title": "arunner harness result record",
   "description": "Terminal record written by `tick.py` to results/result-NNNNN.json when a run reaches a terminal state. Sourced from the worker's terminal heartbeat sentinel (completed/failed) or synthesized by the harness (auth_or_launch_failed — no worker terminal was ever emitted).",
   "type": "object",
   "required": ["job_id", "task_id", "terminal_status", "reaped_ts"],
