@@ -123,6 +123,43 @@ class CheckValidation(unittest.TestCase):
                             for x in probs))
 
 
+class ComplexityScreenPortability(unittest.TestCase):
+    """instr 039 regression: the ReDoS complexity screen must work on BOTH stdlib
+    parser modules -- `re._parser` (3.11+) and `sre_parse` (<=3.10). An earlier
+    version did `re._parser` unconditionally and swallowed the AttributeError on
+    3.10 into a silent pass, disabling the screen on a supported Python. This
+    forces the <=3.10 fallback path and confirms `(a+)+` is still detected."""
+
+    def test_screen_detects_via_sre_parse_fallback(self):
+        import re as _re
+        import warnings
+        had = hasattr(_re, "_parser")
+        saved = getattr(_re, "_parser", None)
+        try:
+            if had:
+                del _re._parser          # simulate Python <=3.10 (no re._parser)
+            self.assertFalse(hasattr(_re, "_parser"))
+            self.assertEqual(_re.compile("x").pattern, "x")  # re.compile survives
+            with warnings.catch_warnings():
+                # sre_parse is deprecated on 3.11+ but is the real module on <=3.10
+                # (where the fallback actually runs); silence it when forcing the
+                # path on a newer Python.
+                warnings.simplefilter("ignore", DeprecationWarning)
+                self.assertTrue(T._regex_complexity_problem("(a+)+"),
+                                "the sre_parse fallback failed to detect (a+)+")
+                self.assertIsNone(T._regex_complexity_problem(r"BUILD (OK|DONE)"),
+                                  "the fallback false-rejected a safe pattern")
+        finally:
+            if had:
+                _re._parser = saved      # restore for the rest of the suite
+        self.assertEqual(hasattr(_re, "_parser"), had)
+
+    def test_screen_works_on_the_native_parser(self):
+        # whatever parser this Python resolves, (a+)+ is rejected, safe patterns pass
+        self.assertTrue(T._regex_complexity_problem("(a*)*"))
+        self.assertIsNone(T._regex_complexity_problem(r"\d{2,5}"))
+
+
 class Synthesis(unittest.TestCase):
 
     def test_wrap_synthesizes_activity_regex_before_command(self):

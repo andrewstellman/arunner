@@ -1432,10 +1432,26 @@ def _regex_complexity_problem(pattern: str):
     module is barred (NFR-3); this catches the common shape, not all ReDoS."""
     if len(pattern) > _ACTIVITY_PATTERN_MAX_LEN:
         return "exceeds the %d-char complexity cap" % _ACTIVITY_PATTERN_MAX_LEN
+    # Resolve the stdlib regex parser PORTABLY (instr 039): `re._parser` exists
+    # only on Python 3.11+; on <=3.10 it is `sre_parse` (re._parser is just the
+    # renamed sre_parse). An earlier version did `__import__("re")._parser`
+    # unconditionally — on 3.10 that raises AttributeError, which a blanket
+    # `except` swallowed into a silent "no problem", DISABLING this ReDoS screen
+    # on a supported Python. Resolve the parser without swallowing it; only the
+    # parse() call (a genuine compile error) returns None (handled by
+    # _regex_problem's re.compile, which always backstops --check).
     try:
-        parsed = __import__("re")._parser.parse(pattern)
+        _parser = __import__("re")._parser            # 3.11+
+    except AttributeError:
+        try:
+            import sre_parse as _parser               # <=3.10
+        except ImportError:
+            return None     # no stdlib parser (impossible on CPython 3.10-3.14);
+            #                 re.compile() in _regex_problem still validates the pattern
+    try:
+        parsed = _parser.parse(pattern)
     except Exception:
-        return None          # internal API moved / compile error handled elsewhere
+        return None          # a genuine compile error — reported by _regex_problem
 
     def _walk(seq, in_repeat):
         for op, av in seq:
