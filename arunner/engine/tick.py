@@ -1090,11 +1090,19 @@ def _adapter_worker_cmd(entry: dict):
         return None
     helper = ["python3", "{HARNESS_BIN}/heartbeat.py", str(adapter),
               "--task-id", "{TASK_ID}", "--heartbeat-path", "{HEARTBEAT_PATH}"]
+    # FR-56: operator activity patterns -> repeated --activity-regex (BOTH
+    # adapters). Passed as argv elements, never through a shell. (Footgun, not
+    # injection: a pattern containing a literal {PLACEHOLDER}-shaped token would
+    # be rewritten by the engine's template substitution -- documented in FR-56.)
+    activity = []
+    for pat in (entry.get("adapter_activity_patterns") or []):
+        activity += ["--activity-regex", str(pat)]
     if adapter == "wrap":
-        return helper + ["--"] + [str(t) for t in (entry.get("command") or [])]
+        return (helper + activity + ["--"]
+                + [str(t) for t in (entry.get("command") or [])])
     if adapter == "tail":
-        out = helper + ["--log-file", str(entry.get("log_path", "")),
-                        "--lock-file", "{LOCK_FILE}"]
+        out = helper + activity + ["--log-file", str(entry.get("log_path", "")),
+                                   "--lock-file", "{LOCK_FILE}"]
         if entry.get("success_regex"):
             out += ["--success-regex", str(entry["success_regex"])]
         if entry.get("failure_regex"):
@@ -1411,10 +1419,96 @@ def _run_auth_check(argv) -> tuple:
     return proc.returncode, "rc=%d" % proc.returncode
 
 
+# FR-56: bounds on operator activity patterns (a ReDoS surface — see FR-56).
+_ACTIVITY_PATTERN_CAP = 16
+_ACTIVITY_PATTERN_MAX_LEN = 500
+
+
+def _regex_complexity_problem(pattern: str):
+    """Conservative ReDoS HEURISTIC (FR-56): reject a pattern with a nested
+    unbounded quantifier (a MAX_REPEAT/MIN_REPEAT directly inside another — the
+    classic catastrophic-backtracking shape, e.g. ``(a+)+``) or one over a
+    length cap. NOT a proof — stdlib `re` has no match timeout and the `regex`
+    module is barred (NFR-3); this catches the common shape, not all ReDoS."""
+    if len(pattern) > _ACTIVITY_PATTERN_MAX_LEN:
+        return "exceeds the %d-char complexity cap" % _ACTIVITY_PATTERN_MAX_LEN
+    try:
+        parsed = __import__("re")._parser.parse(pattern)
+    except Exception:
+        return None          # internal API moved / compile error handled elsewhere
+
+    def _walk(seq, in_repeat):
+        for op, av in seq:
+            name = getattr(op, "name", str(op))
+            if name in ("MAX_REPEAT", "MIN_REPEAT"):
+                if in_repeat:
+                    return True
+                if _walk(av[2], True):
+                    return True
+            elif name == "BRANCH":
+                for branch in (av[1] or []):
+                    if _walk(branch, in_repeat):
+                        return True
+            elif name == "SUBPATTERN":
+                # NB: re._parser.SubPattern is iterable via the sequence
+                # protocol (__getitem__/__len__) but has NO __iter__ — so never
+                # guard on hasattr(__iter__); recurse and let _walk's for-loop
+                # iterate it (a non-sequence av raises, caught by the outer try).
+                if _walk(av[-1], in_repeat):
+                    return True
+            elif name in ("ASSERT", "ASSERT_NOT"):
+                if _walk(av[1], in_repeat):
+                    return True
+        return False
+    try:
+        if _walk(parsed, False):
+            return "nested unbounded quantifier (catastrophic-backtracking shape)"
+    except Exception:
+        return None
+    return None
+
+
+def _regex_problem(pattern: str):
+    """Compile + complexity-screen a regex. Returns a problem phrase or None."""
+    import re as _re
+    try:
+        _re.compile(pattern)
+    except _re.error as exc:
+        return "not a valid regex (%s)" % exc
+    return _regex_complexity_problem(pattern)
+
+
+def _check_activity_patterns(tag: str, e: dict, problems: list) -> None:
+    """FR-56: validate ``adapter_activity_patterns`` (both adapters)."""
+    pats = e.get("adapter_activity_patterns")
+    if pats is None:
+        return
+    if not isinstance(pats, list):
+        problems.append("%s.adapter_activity_patterns: must be an array of "
+                        "regex strings" % tag)
+        return
+    if len(pats) > _ACTIVITY_PATTERN_CAP:
+        problems.append("%s.adapter_activity_patterns: at most %d patterns "
+                        "(got %d)" % (tag, _ACTIVITY_PATTERN_CAP, len(pats)))
+    for j, pat in enumerate(pats):
+        sub = "%s.adapter_activity_patterns[%d]" % (tag, j)
+        if not isinstance(pat, str):
+            problems.append("%s: must be a string" % sub)
+            continue
+        if pat == "":
+            problems.append("%s: an empty pattern matches every line and "
+                            "silently defeats the filter" % sub)
+            continue
+        prob = _regex_problem(pat)
+        if prob:
+            problems.append("%s: %s: %r" % (sub, prob, pat))
+
+
 def _check_adapter_entry(tag: str, e: dict) -> list:
     """FR-41: validate an `adapter: wrap|tail` entry. The engine synthesizes
     the worker_cmd, so the worker_prompt/placeholder plumbing is NOT required
-    here — the operator declares intent in one place."""
+    here — the operator declares intent in one place. FR-56 adds activity-
+    pattern validation + compiles all adapter regexes (success/failure too)."""
     p = []
     adapter = e.get("adapter")
     if adapter not in _VALID_ADAPTERS:
@@ -1438,6 +1532,15 @@ def _check_adapter_entry(tag: str, e: dict) -> list:
                 p.append("%s.%s: must be a string" % (tag, key))
         if "pid" in e and not (isinstance(e["pid"], int) and not isinstance(e["pid"], bool)):
             p.append("%s.pid: must be an integer" % tag)
+        # FR-56 retrofit: compile + complexity-screen the doneness regexes too
+        # (today they were only type-checked).
+        for key in ("success_regex", "failure_regex"):
+            if isinstance(e.get(key), str) and e[key]:
+                prob = _regex_problem(e[key])
+                if prob:
+                    p.append("%s.%s: %s: %r" % (tag, key, prob, e[key]))
+    # FR-56: activity patterns apply to BOTH adapters.
+    _check_activity_patterns(tag, e, p)
     return p
 
 

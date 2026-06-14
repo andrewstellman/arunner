@@ -305,6 +305,91 @@ def _last_output_line(capture_path: Path) -> Optional[str]:
     return None
 
 
+# --- FR-56: operator-declared activity-pattern extraction (display-only) ----
+# The wrap/tail adapters surface the most-recent OUTPUT LINE matching an
+# operator activity pattern as the ACTIVITY label, filtering a chatty tool's
+# noise. DISPLAY-ONLY -- never doneness (the FR-18 producer/reader boundary: the
+# adapter chooses `label`; the engine still interprets only `status`). Pure
+# stdlib `re`, no new dependency (NFR-3).
+_ACTIVITY_LINE_CAP = 4096            # truncate each line before matching (~4 KiB)
+_ACTIVITY_SCAN_CEILING = 256 * 1024  # per-scan total-bytes ceiling (~256 KiB)
+
+
+def _age_hint(secs: float) -> str:
+    """Compact ASCII age (NFR-7 cp1252 safety) for a stale matched line:
+    '45s' / '8m' / '2h'."""
+    s = max(0, int(secs))
+    if s < 90:
+        return "%ds" % s
+    m = s // 60
+    if m < 90:
+        return "%dm" % m
+    return "%dh" % (m // 60)
+
+
+class _ActivityMatcher:
+    """Track the most-recent output line matching any operator activity pattern
+    (FR-56), for the ACTIVITY label.
+
+    ``feed(lines, now)`` scans new lines: each line is truncated to a bounded
+    length and a per-scan total-bytes ceiling stops matching for that scan and
+    retains the last label -- this bounds the INPUT and protects the tick loop
+    from a chatty tool x N patterns; it does NOT bound catastrophic backtracking
+    (a property of the operator-owned pattern -- honestly: the complexity screen
+    at --check + the <=16-pattern cap are the partial mitigations, ReDoS is
+    reduced and disclosed, not eliminated). ``label(now, interval)`` returns the
+    matched line, with an age hint when its source line is older than one
+    keepalive interval (so a pinned-but-stale status never looks live), or the
+    neutral '(running...)' placeholder before any match. DISPLAY-ONLY."""
+
+    def __init__(self, patterns):
+        self.patterns = list(patterns or [])     # compiled re objects
+        self.matched = None
+        self.matched_at = None
+
+    def feed(self, lines, now):
+        if not self.patterns:
+            return
+        scanned = 0
+        for ln in lines:
+            ln = ln[:_ACTIVITY_LINE_CAP]
+            scanned += len(ln)
+            if scanned > _ACTIVITY_SCAN_CEILING:
+                break                            # ceiling: retain the last label
+            for rx in self.patterns:
+                try:
+                    if rx.search(ln):
+                        self.matched = ln.strip()
+                        self.matched_at = now
+                        break
+                except Exception:
+                    pass                         # display-only: never crash a worker
+
+    def label(self, now, interval):
+        if not self.patterns:
+            return None                          # caller falls back to its default
+        if self.matched is None:
+            return "(running...)"
+        if (self.matched_at is not None
+                and (now - self.matched_at) > max(1.0, interval)):
+            return "%s (%s ago)" % (self.matched, _age_hint(now - self.matched_at))
+        return self.matched
+
+
+def _compile_activity(patterns):
+    """Build an _ActivityMatcher from raw pattern strings (validated at --check;
+    skip an uncompilable one defensively at runtime -- display must never crash
+    the worker)."""
+    import re as _re
+    compiled = []
+    for p in (patterns or []):
+        try:
+            compiled.append(_re.compile(p))
+        except _re.error:
+            pass
+    return _ActivityMatcher(compiled)
+
+
 def keepalive_interval_secs(launch_grace_secs: float, stall_secs: float) -> float:
     """The keepalive floor (FR-40): a single interval that is BOTH within
     launch_grace (first IN_PROGRESS lands before LAUNCH-FAIL) AND <= 1/3 of the
@@ -324,24 +409,39 @@ class _Keepalive:
     explicit clock values (no real sleeps)."""
 
     def __init__(self, *, hb_path: Path, task_id: str, capture_path: Path,
-                 interval_secs: float, start_ts: float):
+                 interval_secs: float, start_ts: float,
+                 activity=None, activity_reader=None):
         self.hb_path = hb_path
         self.task_id = task_id
         self.capture_path = capture_path
         self.interval = max(1.0, float(interval_secs))
         self.last_emit = float(start_ts)   # STARTING was emitted at start_ts
         self.count = 0
+        # FR-56: an optional _ActivityMatcher selects the label from operator
+        # activity patterns. ``activity_reader`` (a _LogTail) is the NEW
+        # incremental reader the WRAP adapter feeds it (wrap's _last_output_line
+        # reads the whole file, so this is genuinely new state, not a free ride);
+        # the TAIL adapter passes activity_reader=None and feeds the matcher from
+        # the _TailWatcher's existing new_lines() pass.
+        self.activity = activity
+        self.activity_reader = activity_reader
 
     def due(self, now: float) -> bool:
         return (now - self.last_emit) >= self.interval
 
     def maybe_emit(self, now: float) -> bool:
         """Emit ONE IN_PROGRESS keepalive if due at ``now``. Returns True if it
-        emitted. Label = the child's most recent output line, or a neutral
-        fallback when the child has been quiet (the ping still fires)."""
+        emitted. Label = the most-recent activity-pattern match (FR-56) if
+        patterns are configured, else the child's most recent output line, or a
+        neutral fallback when the child has been quiet (the ping still fires)."""
         if not self.due(now):
             return False
-        label = _last_output_line(self.capture_path) or "(running, no output yet)"
+        if self.activity is not None and self.activity.patterns:
+            if self.activity_reader is not None:      # wrap: feed our own reader
+                self.activity.feed(self.activity_reader.new_lines(), now)
+            label = self.activity.label(now, self.interval)
+        else:
+            label = _last_output_line(self.capture_path) or "(running, no output yet)"
         append_line(self.hb_path, build_progress(
             label=label, task_id=self.task_id, status="IN_PROGRESS",
             ts=_iso_from_epoch(now)))
@@ -397,8 +497,13 @@ def _cmd_wrap(args) -> int:
                 task_id=tid, status="FAILED", result_file=str(capture_path),
                 summary="wrap: could not launch %r (%s)" % (cmd, exc)))
             return 1
+        # FR-56: wrap needs a NEW incremental reader over the capture file (its
+        # _last_output_line reads the whole file); the keepalive feeds it.
+        activity = _compile_activity(getattr(args, "activity_regex", None))
+        reader = _LogTail(capture_path) if activity.patterns else None
         ka = _Keepalive(hb_path=Path(hb), task_id=tid, capture_path=capture_path,
-                        interval_secs=interval, start_ts=start)
+                        interval_secs=interval, start_ts=start,
+                        activity=activity, activity_reader=reader)
         while True:
             try:
                 proc.wait(timeout=interval)
@@ -462,17 +567,23 @@ class _TailWatcher:
     log lines, touch the sentinel, hand it a fake/real process)."""
 
     def __init__(self, *, log_file, success_re=None, failure_re=None,
-                 sentinel=None, proc=None, pid=None):
+                 sentinel=None, proc=None, pid=None, activity=None):
         self.tail = _LogTail(log_file)
         self.success_re = success_re
         self.failure_re = failure_re
         self.sentinel = Path(sentinel) if sentinel else None
         self.proc = proc        # a Popen we own (.poll())
         self.pid = pid          # an external PID we only watch
+        self.activity = activity   # FR-56 _ActivityMatcher (display-only)
 
-    def poll(self):
-        # (1) overlay: scan NEW log lines (failure wins over success on a line)
-        for line in self.tail.new_lines():
+    def poll(self, now=None):
+        # (1) overlay: scan NEW log lines (failure wins over success on a line).
+        # FR-56: the SAME incremental pass feeds the activity matcher (the tail
+        # rides this existing pass -- no second reader), display-only.
+        lines = self.tail.new_lines()
+        if self.activity is not None and now is not None:
+            self.activity.feed(lines, now)
+        for line in lines:
             if self.failure_re and self.failure_re.search(line):
                 return "FAILED"
             if self.success_re and self.success_re.search(line):
@@ -549,11 +660,14 @@ def _cmd_tail(args) -> int:
     if watched_pid is not None and args.lock_file:
         _record_pid_in_lock(args.lock_file, watched_pid)
 
+    # FR-56: the tail rides the watcher's existing new_lines() pass (the matcher
+    # is shared); the keepalive reads its label (activity_reader=None).
+    activity = _compile_activity(getattr(args, "activity_regex", None))
     watcher = _TailWatcher(log_file=log_file, success_re=success_re,
                            failure_re=failure_re, sentinel=args.sentinel_file,
-                           proc=proc, pid=watched_pid)
+                           proc=proc, pid=watched_pid, activity=activity)
     ka = _Keepalive(hb_path=Path(hb), task_id=tid, capture_path=log_file,
-                    interval_secs=interval, start_ts=start)
+                    interval_secs=interval, start_ts=start, activity=activity)
     terminal = None
     # A pure-tail watch with no process and no sentinel/regex has no doneness
     # signal -- guard against an unbounded loop (the engine's dead-PID backstop
@@ -565,7 +679,7 @@ def _cmd_tail(args) -> int:
               f"--sentinel-file, or a marker regex)", file=sys.stderr)
         return 64
     while terminal is None:
-        terminal = watcher.poll()
+        terminal = watcher.poll(_now())     # FR-56: now feeds the activity matcher
         if terminal is not None:
             break
         ka.maybe_emit(_now())
@@ -619,6 +733,9 @@ def _build_parser() -> argparse.ArgumentParser:
     wr.add_argument("--capture-file", default=None,
                     help="where to capture child stdout+stderr "
                          "(default <heartbeat-dir>/wrap.out)")
+    wr.add_argument("--activity-regex", action="append", default=None,
+                    help="FR-56: show the most-recent captured line matching "
+                         "this as the ACTIVITY label (display-only; repeatable)")
     wr.add_argument("command", nargs=argparse.REMAINDER,
                     help="-- <command> [args...] to run")
 
@@ -640,6 +757,9 @@ def _build_parser() -> argparse.ArgumentParser:
                          "(the engine's dead-PID reap backstop)")
     ta.add_argument("--launch-grace-minutes", type=int, default=None)
     ta.add_argument("--stall-threshold-minutes", type=int, default=None)
+    ta.add_argument("--activity-regex", action="append", default=None,
+                    help="FR-56: show the most-recent log line matching this as "
+                         "the ACTIVITY label (display-only; repeatable)")
     ta.add_argument("command", nargs=argparse.REMAINDER,
                     help="-- <command> [args...] to launch+own (optional)")
     return p
