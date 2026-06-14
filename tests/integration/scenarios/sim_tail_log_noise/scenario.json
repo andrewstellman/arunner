@@ -1,0 +1,47 @@
+{
+  "description": "instr 037: the cross-platform simulator in LOG mode (with noise) writing its own log, driven through the FR-41 tail adapter via the `adapter: tail` selector. The sim writes IN_PROGRESS + noise + a terminal line to {RUN_DIR}/sim.log; the success_regex 'COMPLETED' picks the relevant line out of the noise and maps to COMPLETED -- the substrate for the future FR-56 activity-pattern path.",
+  "plan": {
+    "schema_version": "1",
+    "tick_interval_minutes": 1,
+    "pool_size": 1,
+    "stall_threshold_minutes": 45,
+    "launch_grace_minutes": 10,
+    "entries": [
+      {
+        "task_id": "sim-tail-1",
+        "target_repo": "{SCENARIO_DIR}",
+        "dispatch_mode": "shell",
+        "adapter": "tail",
+        "log_path": "{RUN_DIR}/sim.log",
+        "success_regex": "COMPLETED",
+        "failure_regex": "\\[FAILED\\]",
+        "command": [
+          "python3",
+          "{STUB}",
+          "--emit",
+          "log",
+          "--log-file",
+          "{RUN_DIR}/sim.log",
+          "--noise",
+          "3",
+          "--steps",
+          "2",
+          "--sleep",
+          "0.02"
+        ]
+      }
+    ]
+  },
+  "control": {
+    "max_ticks": 4
+  },
+  "expected": {
+    "done": true,
+    "run_states": {
+      "run-01": "completed"
+    },
+    "counts": {
+      "completed": 1
+    }
+  }
+}

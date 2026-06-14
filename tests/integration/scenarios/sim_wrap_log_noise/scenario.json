@@ -1,0 +1,55 @@
+{
+  "description": "instr 037: the cross-platform simulator in LOG mode (with noise) driven through the FR-40 wrap adapter. The wrap adapter runs `sim_worker --emit log --noise 3 --rate 2`, captures its stdout (interleaved work + noise lines) as the activity, and reaps COMPLETED from exit 0 -- proving the simulator's log/noise mode works end-to-end with a real adapter + the independent checker.",
+  "plan": {
+    "schema_version": "1",
+    "tick_interval_minutes": 1,
+    "pool_size": 1,
+    "stall_threshold_minutes": 45,
+    "launch_grace_minutes": 10,
+    "entries": [
+      {
+        "task_id": "sim-wrap-1",
+        "target_repo": "{SCENARIO_DIR}",
+        "dispatch_mode": "shell",
+        "worker_prompt": "sim wrap (worker_cmd carries {HEARTBEAT_PATH})",
+        "worker_cmd": [
+          "python3",
+          "{HEARTBEAT_BIN}",
+          "wrap",
+          "--task-id",
+          "{TASK_ID}",
+          "--heartbeat-path",
+          "{HEARTBEAT_PATH}",
+          "--",
+          "python3",
+          "{STUB}",
+          "--emit",
+          "log",
+          "--noise",
+          "3",
+          "--rate",
+          "2",
+          "--steps",
+          "2",
+          "--sleep",
+          "0.02",
+          "--exit-code",
+          "0"
+        ]
+      }
+    ]
+  },
+  "control": {
+    "max_ticks": 4
+  },
+  "expected": {
+    "done": true,
+    "run_states": {
+      "run-01": "completed"
+    },
+    "counts": {
+      "completed": 1
+    },
+    "summary_present": true
+  }
+}
