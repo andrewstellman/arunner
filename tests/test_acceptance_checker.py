@@ -34,6 +34,24 @@ C = _load("checker_acc", _CHECKER_SRC)
 _TERMINAL = ("completed", "failed", "auth_or_launch_failed", "abandoned")
 
 
+class AcceptancePlansCheck(unittest.TestCase):
+    """instr 043 guard: every committed acceptance plan must pass --check. This
+    would have caught the uc5_floor `{STUB}` defect -- a placeholder only the
+    integration test runner substitutes, so the real engine rejected it."""
+
+    def test_all_acceptance_plans_check_clean(self):
+        tick = _load("tick_acc_plans", _ROOT / "arunner" / "engine" / "tick.py")
+        plans_dir = _ROOT / "tests" / "acceptance" / "plans"
+        plans = [p for p in sorted(plans_dir.glob("*.json"))
+                 if isinstance(json.loads(p.read_text(encoding="utf-8")), dict)
+                 and "entries" in json.loads(p.read_text(encoding="utf-8"))]
+        self.assertTrue(plans, "no acceptance plans found under %s" % plans_dir)
+        for p in plans:
+            problems = tick.check_plan(str(p))
+            self.assertEqual(problems, [], "%s failed --check: %s"
+                             % (p.name, problems))
+
+
 def _build_run_dir(states=("completed", "completed", "completed"), done=True,
                    with_journal=True):
     """A durable run-dir a real run would leave (NO _check_meta.json)."""

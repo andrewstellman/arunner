@@ -12,8 +12,8 @@
       "worker_prompt": "floor stub floor-a",
       "worker_cmd": [
         "python3",
-        "{STUB}",
-        "--heartbeat",
+        "{HARNESS_BIN}/demo_worker.py",
+        "--heartbeat-path",
         "{HEARTBEAT_PATH}",
         "--task-id",
         "{TASK_ID}",
@@ -22,7 +22,7 @@
         "--steps",
         "1",
         "--sleep",
-        "0.05"
+        "0"
       ]
     },
     {
@@ -32,8 +32,8 @@
       "worker_prompt": "floor stub floor-b",
       "worker_cmd": [
         "python3",
-        "{STUB}",
-        "--heartbeat",
+        "{HARNESS_BIN}/demo_worker.py",
+        "--heartbeat-path",
         "{HEARTBEAT_PATH}",
         "--task-id",
         "{TASK_ID}",
@@ -42,7 +42,7 @@
         "--steps",
         "1",
         "--sleep",
-        "0.05"
+        "0"
       ]
     },
     {
@@ -52,8 +52,8 @@
       "worker_prompt": "floor stub floor-c",
       "worker_cmd": [
         "python3",
-        "{STUB}",
-        "--heartbeat",
+        "{HARNESS_BIN}/demo_worker.py",
+        "--heartbeat-path",
         "{HEARTBEAT_PATH}",
         "--task-id",
         "{TASK_ID}",
@@ -62,7 +62,7 @@
         "--steps",
         "1",
         "--sleep",
-        "0.05"
+        "0"
       ]
     }
   ]
