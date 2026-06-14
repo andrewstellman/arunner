@@ -1,0 +1,102 @@
+# Panelist A — Spec Coherence & Completeness of the Closed Halt Set (FR-55)
+
+**Charter:** Adversarial review of FR-55's "continuation contract," focusing on whether the closed halt set `{done, failed, stop, pause, cancel, blocked:<id>}` is complete and coherent with the rest of REQUIREMENTS.md, whether the abandonment detector false-positives on legitimate scheduled waits / in-context pauses, whether `blocked:<id>` is actually specified anywhere, and whether US-11 / UC-11 cohere with the FR.
+
+**Verdict: REVISE-REQUIRED.**
+
+The core idea is sound and the audit-from-disk framing is the right shape. But the closed halt set is **incomplete** (it misses at least two real engine states and arguably a third), the abandonment detector as worded is **broken for every cadence rung except rung 1 and false-fires on in-context pauses** (Finding 2 — the most serious), and `blocked:<id>` is an **undefined state with no recording/clearing FR and an undefined relationship to existing schema**. None of these is fatal to the concept; all are fixable with bounded edits before this FR can be built against. Shipping as written would produce an engine that either computes `CONTINUE` forever in real states or emits a `HALT` with no reason code, and a detector that flags healthy rung-2/3/4 runs as abandoned.
+
+---
+
+## Finding 1 — The closed halt set is incomplete; at least two real states have no reason code (REVISE-REQUIRED)
+
+FR-55 (line 321) asserts the set `{done, failed, stop, pause, cancel, blocked:<id>}` is closed — *"no other halt reason exists."* That is a strong, falsifiable claim, and the existing engine falsifies it. The verdict is defined as `CONTINUE` iff `non-terminal ∧ no STOP/PAUSE/CANCEL ∧ no blocker`. So **any** real state that is none of {terminal, STOP/PAUSE/CANCEL present, blocker recorded} computes `CONTINUE` — forever — even when the run can make no further progress. Three such states exist or are plausible:
+
+**1a. `stalled` is a non-terminal, non-killable wedge state — and it maps to no halt reason.** `tick.py:32` states plainly: *"`stalled` is NON-terminal and NON-killable in the MVP."* `_TERMINAL_STATES` (`tick.py:87`) is `("completed", "failed", "auth_or_launch_failed", "abandoned")` — `stalled` is deliberately absent. A run can sit in `stalled` indefinitely (FR-8 marks it on heartbeat-age overflow; the only operator out is FR-39 `CANCEL`). Under FR-55's definition, a run that is `stalled` with nothing dispatchable is **non-terminal ∧ no control ∧ no blocker ⇒ `CONTINUE`** — so the contract orders the host to "advance another tick" forever against a run that cannot progress. That is the exact pathology FR-55 exists to *prevent* (an unattended run that never resolves), reintroduced through the back door. **Either `stalled`-with-no-dispatchable-work must produce a halt reason, or FR-55 must explicitly state that a stalled run is still `CONTINUE` and is the operator's problem to CANCEL — and justify why that doesn't recreate the silent-hang it's guarding against.**
+
+**1b. `auth_or_launch_failed` is terminal but maps to no listed reason.** `_TERMINAL_STATES` includes `auth_or_launch_failed`. When a run reaches it, the engine's aggregate `done` (FR-11: "all entries terminal") can become true with that entry counted as terminal — so the verdict would be `HALT:done`. But `done` semantically means "the run finished its work," and an `auth_or_launch_failed` run did **not** do its work. Calling that `HALT:done` is a coherence defect: the closed set conflates "completed cleanly" with "every entry reached *some* terminal, including launch failure." The set needs to either (a) admit `failed` covers `auth_or_launch_failed` (and say so explicitly — right now `failed` reads as the worker-FAILED sentinel, which is a *different* terminal per `tick.py:87`), or (b) add a distinct reason. As written, an operator auditing the journal sees `HALT:done` on a run that never authenticated — the audit trail lies.
+
+**1c. Iteration-budget / max-ticks exhaustion has no reason code.** The integration runner (`tests/integration/runner.py:32,159,166`) loops `for tick_no in range(1, max_ticks + 1)` with `_MAX_TICKS = 60` and simply **falls out of the loop** when the budget is exhausted — no terminal state is written, no `done`, no `stop`. The production ticker has the same shape (`ticker.py:274,304`: `--max-ticks` prints a continue-command and exits). So a real, shipped code path stops ticking with the run still non-terminal and the last verdict still `CONTINUE`. Under FR-55's *own* detector (Finding 2), that is **silent abandonment** — the harness's own test driver and `--max-ticks` exit would be flagged as a contract violation. The set needs a `budget` (or `max_ticks`) reason, OR FR-55 must carve out "a deterministic ticker hitting its operator-set `--max-ticks` and printing the continue command is a legitimate, recorded halt, not abandonment" — and the verdict/journal must record *which*.
+
+**Recommended edit (line 321):** expand the closed set and make the closure claim defensible:
+
+> ... `HALT:<reason>` with `reason` in the **closed set** `{done, failed, stop, pause, cancel, blocked:<id>, stalled, budget}` — where `failed` covers any non-clean terminal (worker `FAILED` *and* `auth_or_launch_failed`), `stalled` is the no-dispatchable-progress wedge (operator must CANCEL), and `budget` is operator-set iteration-budget / `--max-ticks` exhaustion. No other halt reason exists; if the engine ever reaches a state outside this set it emits `HALT:internal_error` and the run is flagged.
+
+That last clause (the `internal_error` catch-all) is the honest way to make a "closed set" claim survive contact with a real codebase — see Finding 1d.
+
+**1d. A fatal engine error distinct from worker `failed` has no reason.** `failed` in the set is the worker terminal sentinel (`tick.py:87`, the `FAILED` heartbeat status). If the *tick engine itself* throws (corrupt `harness_status.json`, a lock it can't acquire past E1's skip, an unwritable run-dir), there is no reason code and arguably no verdict written at all — which again reads as silent abandonment to the detector. A `HALT:internal_error` (or `error`) sentinel closes the set against the engine's own failure modes. Without it, "closed set" is aspirational, not true.
+
+---
+
+## Finding 2 — The abandonment detector false-positives on every non-rung-1 cadence and on in-context pauses (REVISE-REQUIRED — most serious)
+
+This is the finding I was most asked to test, and it is real. FR-55 (line 323) defines silent abandonment as:
+
+> a non-terminal run with verdict `CONTINUE`, **no further tick across a time gap**, and no yield record.
+
+UC-11 alt-path (b) (line 198) and US-11 (line 43) restate the same "time has passed + still CONTINUE + no yield = violation" shape. **"Across a time gap" is doing undefined load-bearing work, and it directly contradicts the cadence model.**
+
+**The contradiction:**
+
+- **FR-23 (line 239)** defines cadence rungs 2/3/4: OS scheduler firing `--once` ticks, foreground ticker loop, and **manual ticks**. A rung-2 cron at the plan's cadence, or a rung-4 manual cadence, *intentionally* produces long gaps between ticks. A run on a 30-minute cron with `CONTINUE` after each tick will, by construction, exhibit "CONTINUE + 30-minute gap + no yield record" between *every* pair of ticks. That is the **designed, healthy** behavior — and FR-55 as worded flags it as silent abandonment.
+- **FR-26a (line 243)** explicitly endorses a low-frequency safety tick at *~3× the plan cadence*, i.e. deliberately sparse ticking, as a *recommended* deployment. The detector would flag the gap between safety ticks.
+- **FR-46 (line 290)** says in-context mode **pauses ticking entirely** during in-context bursts: *"while in-context work is in progress the agent cannot tick, so heartbeat reads, stall detection, dispatch, and status updates pause."* FR-49 (line 293) even adds a status-table banner to make that pause "read as intentional, not as a dropped loop." So the spec *already acknowledges* that "no tick across a time gap" is a legitimate, expected state — and FR-55's detector contradicts FR-46/FR-49 head-on.
+- **FR-8 (line 214)** builds the whole engine on wall-clock-jump tolerance: *"a wall-clock jump (tick gap ≫ cadence) suppresses stall marking."* The engine is explicitly designed to tolerate irregular, gappy ticking. FR-55's detector is the one place that treats a tick gap as pathological.
+
+**Root cause:** FR-55 conflates two distinct propositions that the rest of the doc keeps separate:
+
+1. `CONTINUE` = "the run is not done and the host must not *permanently* relinquish on its own judgment."
+2. "tick again RIGHT NOW."
+
+FR-55 needs (1). Its detector is written as if `CONTINUE` meant (2). The bridge the doc already has and FR-55 ignores is **`next_tick_minutes`** — the engine already emits it (FR-5: `{... next_tick_minutes ...}`; FR-11 suppresses it on terminal ticks; it's already in `harness_status.json` per the integration runner trace at `runner.py:180`). A scheduled wait is not abandonment until the *scheduled* next-tick time has passed with no tick and no yield.
+
+**Recommended fix (rewrite the abandonment clause, line 323).** The verdict must carry a next-tick-due timestamp, and abandonment must key on *overdue*, not on *any gap*:
+
+> The continuation verdict carries `next_tick_due` (derived from the engine's existing `next_tick_minutes`, FR-5). **Silent abandonment** = verdict `CONTINUE` ∧ wall-clock now is past `next_tick_due` by more than a tolerance margin (≥ one cadence interval, to absorb FR-8 wall-clock jumps and rung-2/4 scheduler jitter) ∧ no subsequent tick ∧ no yield record. A long but *scheduled* gap (rung 2/3/4 cadence, the FR-26a safety-tick interval) is **not** abandonment while now ≤ `next_tick_due`. A verdict emitted with `monitoring_paused` set (FR-46/FR-49 in-context burst) suspends the abandonment clock entirely until ticking resumes.
+
+Without this, the `continuation_contract` integration scenario will only ever be valid at rung 1 with a tight cadence, and a real rung-3 dogfood run (which is the stated NFR-12 audit vehicle, line 379) will trip its own detector. Note also: the in-context burst case needs an explicit `monitoring_paused` flag on the verdict, because there is no `next_tick_due` during an in-context burst — ticking is *paused*, not *scheduled*. FR-49's banner data is the natural carrier; FR-55 should reference it.
+
+**Secondary coherence gap on PAUSE:** FR-36 (line 272) says a `PAUSE` file "makes the orchestrator stop scheduling new ticks." FR-55 maps `PAUSE` present ⇒ `HALT:pause`, and the host yields. Good — that path is coherent. But note the asymmetry the FR should call out: under PAUSE the verdict is `HALT:pause` (host legitimately yields), whereas under an in-context burst (FR-46) the verdict is still `CONTINUE` but ticking is paused. Two different "not ticking right now" states with opposite verdicts. FR-55 must distinguish them explicitly or the detector cannot tell a legitimate in-context pause (CONTINUE, clock suspended) from an abandonment (CONTINUE, overdue). The `monitoring_paused` flag above is what disambiguates; the FR currently provides nothing.
+
+---
+
+## Finding 3 — `blocked:<id>` is an undefined state: no FR records it, clears it, or fits it to the existing schema (REVISE-REQUIRED)
+
+`blocked:<id>` is the only *new* member of the halt set, and it is the least specified. FR-55 (line 322), UC-11 step 4 (line 194), and the postconditions (line 200) all reference *"a `blocked:<id>` record written to disk,"* but **no FR defines the blocker mechanism at all.** Searching the doc, there is no FR-NN describing:
+
+- **What a blocker record is** — a file at the run-dir root (like the control files, FR-35)? A field in `harness_status.json` (whose schema is `tick.py:247–253`: `cycle`, `pool_size`, `counts`, `done`, `runs` — there is **no `blocker` key**)? A `results/` record? UC-11 says "writes a `blocked:<id>` record to disk" with zero schema.
+- **Who writes it.** UC-11 step 4 says the *host* writes it. But the host is the LLM whose discretion FR-55 is explicitly trying to *remove from the loop*. A blocker that only the host can author is a discretion hole exactly the size of the problem: the host can decline to write a blocker and silently stop (caught as abandonment), OR write a spurious blocker to manufacture a legitimate-looking yield. The latter is an *uncaught* escape from the contract — the detector only checks that yields cite in-set reasons; `blocked:<id>` is in-set, so a fabricated blocker yields cleanly. **FR-55's own threat model (the host rationalizing a stop) defeats the contract through self-authored blockers unless the blocker has an independent legitimacy check.** This needs to be named as a known limitation at minimum.
+- **How a blocker clears.** Nothing in the doc says how `blocked:<id>` is resolved. The operator returns, makes the decision — then what? Deletes a file? Drops a `RESUME`? (FR-36 `RESUME` is defined only against `PAUSE`.) An unclearable blocker is a permanent `HALT:blocked` — the run can never resume, contradicting FR-13 (resume) and the `resume` verb (FR-53, line 314).
+- **Relationship to existing mechanisms.** `blocked:<id>` overlaps three existing things and the doc reconciles none of them:
+  - **FR-48 ERR** is described as the externalize-recognize-rehydrate disk substrate. Is a blocker an ERR artifact? Undefined.
+  - **FR-39 `CANCEL`** is the existing operator out for a stuck run (writes `abandoned` terminal). How does `blocked` (non-terminal, awaiting operator) differ operationally from a run the operator could just `CANCEL`? The FR should position blocker vs. CANCEL.
+  - The **control-file convention (FR-35)** is a *closed* set: `STOP, PAUSE, RESUME, CADENCE, POOL, POLL-NOW, CANCEL`. If a blocker is a control file, it breaks the "fixed, closed set" claim of FR-35. If it's not, it's a new disk-truth artifact with no schema FR. Either way FR-35's closure claim and FR-55's blocker need explicit reconciliation.
+
+**Recommended edit:** add a dedicated FR (e.g., FR-56) — or a labeled sub-bullet of FR-55 — that specifies the blocker record: its location and schema (recommend a `blockers/` subdir or a `blockers` array in `harness_status.json`, with `id`, `created_at`, `reason`, `cleared_at`), who may write it (and the explicit acknowledgement that host-authored blockers are a discretion surface the detector cannot fully close — state this as a known limitation), and how it clears (an operator action that the engine reads to flip the verdict back to `CONTINUE`, threaded through FR-13 resume). Until that exists, `HALT:blocked` is a verdict the engine cannot actually compute, because nothing tells it where to look for a recorded blocker — and `tick.py` would need a schema change (line 247) that no FR authorizes.
+
+---
+
+## Finding 4 — US-11 / UC-11 vs. FR-55 wording (CONCERN, mostly minor — one real gap)
+
+The user story, use case, and FR are unusually consistent (clearly written together), so most of this is minor. The substantive item is 4c.
+
+**4a (minor — terminology).** UC-11 preconditions (line 189) and step 1 (line 191) use *"no halting control"* and *"no recorded blocker,"* while FR-55 (line 321) enumerates *"no STOP/PAUSE/CANCEL control present ∧ no blocker recorded."* These agree, but note **`RESUME`, `CADENCE`, `POOL`, `POLL-NOW` are controls that are NOT halting** — the precedence in FR-35 (line 271) is `STOP > CANCEL > PAUSE/RESUME > CADENCE/POOL > POLL-NOW`. FR-55's "no STOP/PAUSE/CANCEL" correctly names only the three halting ones, but UC-11's looser "no halting control" could be read as "no control file at all," which would wrongly make a `POLL-NOW` or `CADENCE` override compute `HALT`. Tighten UC-11 to name the same three.
+
+**4b (minor — `RESUME` is in the halting trio's neighborhood).** FR-55 lists `PAUSE` as a halt trigger but not `RESUME`. Correct (RESUME un-pauses). But the verdict definition should be explicit that it keys on the *effective paused state* in `harness_status.json` (`paused: true`, `tick.py:519/524`), not on the mere presence of a `PAUSE` file — because FR-35 says sticky controls are *consumed once persisted*. After consumption there is no `PAUSE` file, only `paused: true` in status. FR-55's "no PAUSE control present" is therefore subtly wrong: the file is gone but the run is paused. **The verdict must read `status.paused`, not file presence.** Same applies to how `stop`/`cancel` are detected post-consumption. This is a real coherence bug between FR-55's file-presence wording and FR-35's consume-and-persist mechanic.
+
+**4c (real gap — UC-11 has no precondition for the cadence/pause carve-out).** UC-11's basic course (lines 191–195) walks tick N → N+1 → terminal with the implicit assumption of tight, back-to-back ticking. It never addresses the long-gap cadence case (Finding 2) and has **no alternative path** for "the host legitimately waits for the scheduled next tick" or "the host is in an in-context burst." Given Finding 2, UC-11 needs an explicit alternative path: *"(d) The verdict is `CONTINUE` and the host is between scheduled ticks (rung 2/3/4) or in an in-context pause (FR-46) — now ≤ `next_tick_due` (or `monitoring_paused` is set) — so no tick is due and no yield is required; the detector stays silent."* Without it, UC-11 documents only the rung-1 tight-loop case and the build will be tested only against that, baking Finding 2's bug into the regression net (`continuation_contract`, line 379).
+
+**4d (minor — UC-11 step 4 inherits Finding 3).** Step 4 (line 194) has the host writing the `blocked:<id>` record, which is the under-specified, discretion-hole mechanism of Finding 3. Once Finding 3 is resolved, revisit step 4 to cite the new blocker FR and to acknowledge the host-authored-blocker limitation rather than presenting it as a clean escape hatch.
+
+**4e (consistency — §9 row).** The §9 row (line 379) describes the test as *"stub-host honor / abandon / false-yield"* — three sub-scenarios matching INTEGRATION_TEST_PLAN.md (lines 58–62). None of those three exercises the cadence-gap false-positive (Finding 2), the `stalled`/`budget` halt reasons (Finding 1), or `blocked:<id>` recording/clearing (Finding 3). The evidence map therefore *over-claims* coverage relative to the FR's actual surface. Once Findings 1–3 land, the scenario set needs a `scheduled_gap_no_false_abandon` case and a `blocked_then_clear` case, and the §9 row should name them — otherwise FR-55 ships "validated" by a test suite that never touches its hardest paths.
+
+---
+
+## Summary of required revisions (all must land before build)
+
+1. **Expand the closed halt set** to cover `stalled` (the non-terminal wedge), an iteration-`budget`/`--max-ticks` exhaustion reason, a fatal-engine `internal_error` catch-all, and disambiguate `failed` vs. `auth_or_launch_failed`. Make the "closed set" claim defensible with the catch-all. *(Finding 1, line 321.)*
+2. **Rewrite the abandonment detector** to key on an overdue `next_tick_due` (derived from the existing `next_tick_minutes`) plus a `monitoring_paused` flag for in-context bursts — not on "any time gap." This is the load-bearing fix; without it the detector is wrong for rungs 2/3/4, the FR-26a safety tick, and FR-46/49 in-context mode. *(Finding 2, lines 323, 198, 43.)*
+3. **Specify `blocked:<id>`** in its own FR: schema, location, who writes it, how it clears (threaded through FR-13 resume), and its relationship to FR-35 controls / FR-39 CANCEL / FR-48 ERR / the `harness_status.json` schema (`tick.py:247`). Name the host-authored-blocker discretion hole as a known limitation. *(Finding 3.)*
+4. **Fix the verdict's state source** from file-presence to persisted status (`status.paused`, etc.) to cohere with FR-35's consume-and-persist mechanic; add the cadence/in-context alternative path to UC-11; tighten "no halting control" wording; and extend the §9/integration scenarios to cover the cadence-gap and blocker paths the current three sub-scenarios miss. *(Finding 4, lines 189–200, 379.)*
+
+The concept is right and the disk-audit framing is the correct way to discipline an LLM host's discretion. But as written, FR-55 would ship an engine that hangs on `stalled`, mis-labels launch failures as `done`, flags its own ticker's `--max-ticks` exit and every cron-cadence gap as abandonment, and promises a `HALT:blocked` verdict it has no schema to compute. Fix the four above and it's shippable.
