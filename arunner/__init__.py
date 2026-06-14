@@ -1,7 +1,9 @@
 """arunner - a batch orchestrator for AI coding agents.
 
-This is a pre-release name reservation (see __version__). The agent harness itself - the
-generic core in this repo's bin/ and the Claude plugin in plugins/ - ships
-as v0.1.0 shortly.
+The generic engine ships inside this package at ``arunner.engine`` (the tick
+state machine, ticker, heartbeat helper, jobs expander, in-context core, demo
+worker); the lifecycle CLI is ``arunner.cli`` (console script ``arunner``). The
+Claude plugin lives in ``plugins/``. ``__version__`` is the single canonical
+version every surface mirrors (FR-34).
 """
 __version__ = "0.1.0"

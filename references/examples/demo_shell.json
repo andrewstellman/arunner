@@ -1,0 +1,28 @@
+{
+  "description": "Bundled zero-API-spend demo (FR-31 / 13a smoke). Three SHELL jobs, pool 2, each wraps a trivial command via the FR-40 wrap adapter -- the ENGINE runs them directly (no live agent, no real work); doneness is the child's exit code. Watch pool-limited dispatch (2 then 1), idle ticks, then a clean reap to `done`. Concretize each target_repo to a real dir before running (every real run substitutes absolute paths).",
+  "schema_version": "1",
+  "tick_interval_minutes": 1,
+  "pool_size": 2,
+  "stall_threshold_minutes": 45,
+  "launch_grace_minutes": 10,
+  "entries": [
+    {
+      "task_id": "demo-a",
+      "target_repo": "/absolute/path/to/demo-target-a",
+      "adapter": "wrap",
+      "command": ["python3", "-c", "print('demo-a: stub work, zero API spend')"]
+    },
+    {
+      "task_id": "demo-b",
+      "target_repo": "/absolute/path/to/demo-target-b",
+      "adapter": "wrap",
+      "command": ["python3", "-c", "print('demo-b: stub work, zero API spend')"]
+    },
+    {
+      "task_id": "demo-c",
+      "target_repo": "/absolute/path/to/demo-target-c",
+      "adapter": "wrap",
+      "command": ["python3", "-c", "print('demo-c: stub work, zero API spend')"]
+    }
+  ]
+}

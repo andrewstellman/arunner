@@ -36,8 +36,8 @@ def _load(name, rel):
 
 
 CLI = _load("arunner_cli_t", "arunner/cli.py")
-TICK = _load("arunner_tick_t", "bin/tick.py")
-JOBS = _load("arunner_jobs_t", "bin/jobs.py")
+TICK = _load("arunner_tick_t", "arunner/engine/tick.py")
+JOBS = _load("arunner_jobs_t", "arunner/engine/jobs.py")
 
 
 class _Base(unittest.TestCase):

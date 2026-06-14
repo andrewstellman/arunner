@@ -1,4 +1,4 @@
-"""v1.5.9 Phase 1B — unit tests for bin/tick.py.
+"""v1.5.9 Phase 1B — unit tests for arunner/engine/tick.py.
 
 Covers the production state machine: --init scaffolding, the
 queued→claimed→running→completed/failed lifecycle, pool_size gating,
@@ -49,7 +49,7 @@ _REPO_ROOT = Path(__file__).resolve().parents[1]
 
 def _load_tick():
     spec = importlib.util.spec_from_file_location(
-        "tick_under_test", str(_REPO_ROOT / "bin" / "tick.py"))
+        "tick_under_test", str(_REPO_ROOT / "arunner" / "engine" / "tick.py"))
     mod = importlib.util.module_from_spec(spec)
     import sys
     sys.modules["tick_under_test"] = mod

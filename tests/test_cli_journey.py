@@ -29,7 +29,7 @@ def _load(name, rel):
 
 
 CLI = _load("arunner_cli_j", "arunner/cli.py")
-JOBS = _load("arunner_jobs_j", "bin/jobs.py")
+JOBS = _load("arunner_jobs_j", "arunner/engine/jobs.py")
 RUNNER = _load("arunner_runner_j", "tests/integration/runner.py")
 CHECKER = _load("arunner_checker_j", "tests/integration/checker.py")
 

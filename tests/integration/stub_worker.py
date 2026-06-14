@@ -9,7 +9,7 @@ it by creating the hold-file. Without ``--hold-file`` it terminates as soon as
 its steps are done (the complete-on-launch behaviour the simple scenarios use).
 
 It appends raw single-line JSON heartbeats with the standard library only --
-no dependency on bin/heartbeat.py -- which also exercises the no-helper worker
+no dependency on arunner/engine/heartbeat.py -- which also exercises the no-helper worker
 contract. Honours ARUNNER_NOW for the timestamp (the clock seam).
 """
 from __future__ import annotations

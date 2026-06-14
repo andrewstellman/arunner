@@ -39,8 +39,8 @@ def _load(name, rel):
     return mod
 
 
-HB = _load("hb_fr41", "bin/heartbeat.py")
-TICK = _load("tick_fr41", "bin/tick.py")
+HB = _load("hb_fr41", "arunner/engine/heartbeat.py")
+TICK = _load("tick_fr41", "arunner/engine/tick.py")
 
 
 def _statuses(hb_path):

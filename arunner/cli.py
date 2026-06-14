@@ -2,11 +2,12 @@
 """arunner CLI — the lifecycle verbs (FR-53) + persist (FR-52.4).
 
 Every verb is a THIN deterministic wrapper over an existing, tested entry point
-in ``bin/`` — no new engine state:
+in the ``arunner.engine`` subpackage (shipped inside the wheel so the installed
+console script works) — no new engine state:
 
   run <plan>       expand (FR-43) -> --check (FR-42) -> init_run + ticker
   status <run-dir> read harness_status.json + plan.json, print _format_table
-                   (bin/tick.py) READ-ONLY — never advances a tick
+                   (arunner.engine.tick) READ-ONLY — never advances a tick
   stop <run-dir>   drop the STOP control file (FR-10)
   resume <run-dir> run the ticker loop (rung 3) against the run-dir (FR-13);
                    --once for a single tick
@@ -27,19 +28,24 @@ import sys
 import tempfile
 from pathlib import Path
 
-_ROOT = Path(__file__).resolve().parents[1]
-_TICKER = _ROOT / "bin" / "ticker.py"
+from arunner import __version__
+
+# The engine lives in the package (arunner/engine/) so the installed console
+# script can reach it; load by packaged file path (works in both the source
+# tree and an installed wheel) and drive the ticker by that same path.
+_ENGINE = Path(__file__).resolve().parent / "engine"
+_TICKER = _ENGINE / "ticker.py"
 
 
-def _load(name, rel):
-    spec = importlib.util.spec_from_file_location(name, _ROOT / rel)
-    mod = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(mod)
-    return mod
+def _load(name, mod):
+    spec = importlib.util.spec_from_file_location(name, _ENGINE / mod)
+    mod_ = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod_)
+    return mod_
 
 
-TICK = _load("arunner_cli_tick", "bin/tick.py")
-JOBS = _load("arunner_cli_jobs", "bin/jobs.py")
+TICK = _load("arunner_cli_tick", "tick.py")
+JOBS = _load("arunner_cli_jobs", "jobs.py")
 
 
 def _resolve_plan(doc):
@@ -188,6 +194,8 @@ def cmd_expand(args) -> int:
 
 def _build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="arunner", description=__doc__.split("\n")[0])
+    p.add_argument("--version", action="version", version="arunner %s" % __version__,
+                   help="print the single-source version (arunner/__init__.py) and exit")
     sub = p.add_subparsers(dest="verb")
 
     r = sub.add_parser("run", help="launch a plan / shorthand / my_run.json")

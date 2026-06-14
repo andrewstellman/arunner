@@ -31,7 +31,7 @@ _ROOT = Path(__file__).resolve().parents[1]
 
 
 def _load_tick():
-    spec = importlib.util.spec_from_file_location("tick_fr39", _ROOT / "bin" / "tick.py")
+    spec = importlib.util.spec_from_file_location("tick_fr39", _ROOT / "arunner" / "engine" / "tick.py")
     mod = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mod)
     return mod

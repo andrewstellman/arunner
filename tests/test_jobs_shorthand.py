@@ -34,8 +34,8 @@ def _load(name, rel):
     return mod
 
 
-JOBS = _load("jobs_fr43", "bin/jobs.py")
-TICK = _load("tick_fr43", "bin/tick.py")
+JOBS = _load("jobs_fr43", "arunner/engine/jobs.py")
+TICK = _load("tick_fr43", "arunner/engine/tick.py")
 
 
 def _check_plan_dict(plan, real_repo):

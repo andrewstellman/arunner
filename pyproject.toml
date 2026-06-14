@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "arunner"
 version = "0.1.0"
-description = "A batch orchestrator for AI coding agents that runs inside your existing agent session - no server, no daemon, no admin rights. (0.0.1 reserves the name; the harness ships here shortly.)"
+description = "A batch orchestrator for AI coding agents that runs inside your existing agent session - no server, no daemon, no admin rights."
 readme = "README.md"
 requires-python = ">=3.10"
 license = { text = "Apache-2.0" }
@@ -25,7 +25,9 @@ Homepage = "https://github.com/andrewstellman/arunner"
 Repository = "https://github.com/andrewstellman/arunner"
 
 [project.scripts]
-arunner = "arunner._reserve:main"
+arunner = "arunner.cli:main"
+arunner-ticker = "arunner.engine.ticker:main"
+arunner-heartbeat = "arunner.engine.heartbeat:main"
 
 [tool.setuptools]
-packages = ["arunner"]
+packages = ["arunner", "arunner.engine"]

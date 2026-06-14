@@ -25,8 +25,8 @@ def _load(name, rel):
     return mod
 
 
-JOBS = _load("jobs_fr44", "bin/jobs.py")
-TICK = _load("tick_fr44", "bin/tick.py")
+JOBS = _load("jobs_fr44", "arunner/engine/jobs.py")
+TICK = _load("tick_fr44", "arunner/engine/tick.py")
 _TOOLKIT = (_ROOT / "TOOLKIT.md").read_text(encoding="utf-8")
 
 

@@ -1,11 +1,13 @@
 """FR-34 — one canonical version, every mirror tracks it (drift-tested).
 
 The single source is ``arunner/__init__.py:__version__``. ``pyproject.toml``,
-``package.json``, and the plugin SKILL.md frontmatter MIRROR it; the
-``_reserve`` console stub READS it (no hardcoded literal). This test is
-VALUE-AGNOSTIC: it never hardcodes the version number — it only asserts every
-surface equals ``__version__`` — so a routine bump touches one place and the
-test still guards drift.
+``package.json``, and the plugin SKILL.md frontmatter MIRROR it; the engine
+banner (``tick.py``) and the REAL installed console script (``arunner.cli:main``
+via ``arunner --version``) READ it (no hardcoded literal). The pre-release
+``_reserve`` stub is RETIRED (13a) — this test now guards the real entry point.
+This test is VALUE-AGNOSTIC: it never hardcodes the version number — it only
+asserts every surface equals ``__version__`` — so a routine bump touches one
+place and the test still guards drift.
 
 MUTATION-VERIFY EVIDENCE (DEVELOPMENT_PROCESS §Mutation-test), instr 018:
   Pin: test_pyproject_mirrors_canonical (and the package.json / SKILL twins).
@@ -18,7 +20,6 @@ from __future__ import annotations
 
 import json
 import re
-import sys
 import unittest
 from pathlib import Path
 
@@ -59,23 +60,44 @@ class VersionSingleSourceTests(unittest.TestCase):
         self.assertIsNotNone(m, "SKILL.md frontmatter has no version")
         self.assertEqual(m.group(1), self.canon)
 
-    def test_reserve_stub_reads_canonical(self):
-        sys.path.insert(0, str(_ROOT))
-        try:
-            import arunner
-            from arunner import _reserve
-        finally:
-            sys.path.pop(0)
-        self.assertEqual(arunner.__version__, self.canon)
-        # the console stub builds its message from __version__, not a literal
-        self.assertTrue(_reserve._MSG.startswith("arunner %s" % self.canon),
-                        "_reserve._MSG must read __version__: %r" % _reserve._MSG)
+    def test_plugin_json_mirrors_canonical(self):
+        # 13a: the marketplace plugin.json version is a release surface too;
+        # it had drifted to 0.0.1 while every other surface was 0.1.0.
+        pj = json.loads((_ROOT / "plugins" / "arunner" / ".claude-plugin"
+                         / "plugin.json").read_text(encoding="utf-8"))
+        self.assertEqual(pj.get("version"), self.canon)
+
+    def test_console_script_is_the_real_cli_not_reserve(self):
+        # 13a: the entry point invokes the real CLI router, and the retired
+        # pre-release stub is gone with no dangling reference.
+        pyproject = (_ROOT / "pyproject.toml").read_text(encoding="utf-8")
+        self.assertIn('arunner = "arunner.cli:main"', pyproject)
+        self.assertNotIn("_reserve", pyproject)
+        self.assertFalse((_ROOT / "arunner" / "_reserve.py").exists(),
+                         "the pre-release _reserve stub must be retired (13a)")
+
+    def test_console_script_prints_canonical(self):
+        # the REAL console script (arunner.cli:main) prints the single source
+        # via `--version` — value-agnostic, so a bump needs no test edit.
+        import contextlib
+        import importlib.util
+        import io
+        spec = importlib.util.spec_from_file_location(
+            "cli_ver", _ROOT / "arunner" / "cli.py")
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        buf = io.StringIO()
+        with self.assertRaises(SystemExit) as cm, \
+                contextlib.redirect_stdout(buf):
+            mod.main(["--version"])
+        self.assertEqual(cm.exception.code, 0)
+        self.assertEqual(buf.getvalue().strip(), "arunner %s" % self.canon)
 
     def test_bin_scripts_read_canonical(self):
         # tick.py / ticker.py read the same single source for their banners
         import importlib.util
         spec = importlib.util.spec_from_file_location(
-            "tick_ver", _ROOT / "bin" / "tick.py")
+            "tick_ver", _ROOT / "arunner" / "engine" / "tick.py")
         mod = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(mod)
         self.assertEqual(mod._arunner_version(), self.canon)

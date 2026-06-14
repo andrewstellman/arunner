@@ -41,7 +41,7 @@ def _load(name, rel):
     return mod
 
 
-IC = _load("incontext_fr46", "bin/incontext.py")
+IC = _load("incontext_fr46", "arunner/engine/incontext.py")
 
 
 class _Base(unittest.TestCase):
@@ -153,7 +153,7 @@ class HonestyTests(unittest.TestCase):
         "README.md": _ROOT / "README.md",
         "TOOLKIT.md": _ROOT / "TOOLKIT.md",
         "SKILL.md": _ROOT / "plugins/arunner/skills/arunner/SKILL.md",
-        "incontext.py": _ROOT / "bin/incontext.py",
+        "incontext.py": _ROOT / "arunner/engine/incontext.py",
     }
 
     @staticmethod

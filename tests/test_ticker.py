@@ -29,8 +29,8 @@ from pathlib import Path
 
 
 _REPO_ROOT = Path(__file__).resolve().parents[1]
-_TICKER = _REPO_ROOT / "bin" / "ticker.py"
-_ENGINE = _REPO_ROOT / "bin" / "tick.py"
+_TICKER = _REPO_ROOT / "arunner" / "engine" / "ticker.py"
+_ENGINE = _REPO_ROOT / "arunner" / "engine" / "tick.py"
 
 
 def _load(name, path):

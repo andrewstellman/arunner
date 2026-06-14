@@ -209,7 +209,7 @@ def init_run(plan_path: Path) -> Path:
     # Base dir is <repo>/harness_runs by default; ARUNNER_RUNS_DIR
     # overrides it (tests point this at a tmp dir to stay hermetic).
     base = os.environ.get("ARUNNER_RUNS_DIR")
-    runs_root = Path(base) if base else Path(__file__).resolve().parent.parent / "harness_runs"
+    runs_root = Path(base) if base else Path(__file__).resolve().parent.parent.parent / "harness_runs"
     run_dir = runs_root / stamp
     for sub in ("queue", "claimed", "results"):
         (run_dir / sub).mkdir(parents=True)
@@ -1229,9 +1229,10 @@ def _locked_skip_output(run_dir: Path) -> dict:
 
 def _arunner_version() -> str:
     """The single canonical version (FR-34): arunner/__init__.py:__version__.
-    bin scripts aren't installed as a package, so read it by repo-relative
-    path rather than importing -- one source, every surface reads it."""
-    init = Path(__file__).resolve().parent.parent / "arunner" / "__init__.py"
+    The engine ships inside the ``arunner`` package (arunner/engine/), so the
+    version file is the package __init__ one level up -- read by path rather
+    than importing, so one source feeds every surface identically."""
+    init = Path(__file__).resolve().parent.parent / "__init__.py"
     try:
         for line in init.read_text(encoding="utf-8").splitlines():
             if line.startswith("__version__"):

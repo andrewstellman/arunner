@@ -36,7 +36,7 @@ _ROOT = Path(__file__).resolve().parents[1]
 
 
 def _load_hb():
-    spec = importlib.util.spec_from_file_location("hb_fr40", _ROOT / "bin" / "heartbeat.py")
+    spec = importlib.util.spec_from_file_location("hb_fr40", _ROOT / "arunner" / "engine" / "heartbeat.py")
     mod = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mod)
     return mod
@@ -151,7 +151,7 @@ class KeepaliveSchedulerTests(_Base):
 
 
 def _load_tick():
-    spec = importlib.util.spec_from_file_location("tick_fr40", _ROOT / "bin" / "tick.py")
+    spec = importlib.util.spec_from_file_location("tick_fr40", _ROOT / "arunner" / "engine" / "tick.py")
     mod = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mod)
     return mod

@@ -37,16 +37,16 @@ class ClockSeamTests(unittest.TestCase):
             os.environ["ARUNNER_NOW"] = self._saved
 
     def test_engine_now_honors_seam(self):
-        tk = _load("tk_seam", "bin/tick.py")
+        tk = _load("tk_seam", "arunner/engine/tick.py")
         self.assertEqual(tk._now(), 1000000000.0)
 
     def test_heartbeat_utc_iso_honors_seam(self):
-        hb = _load("hb_seam", "bin/heartbeat.py")
+        hb = _load("hb_seam", "arunner/engine/heartbeat.py")
         self.assertEqual(hb._utc_iso(), "2001-09-09T01:46:40Z")
 
     def test_heartbeat_falls_back_when_unset(self):
         os.environ.pop("ARUNNER_NOW", None)
-        hb = _load("hb_seam2", "bin/heartbeat.py")
+        hb = _load("hb_seam2", "arunner/engine/heartbeat.py")
         # real now -- just assert it's a well-formed Zulu stamp, not the frozen one
         ts = hb._utc_iso()
         self.assertRegex(ts, r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$")

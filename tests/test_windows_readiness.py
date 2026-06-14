@@ -40,10 +40,10 @@ from pathlib import Path
 
 
 _REPO_ROOT = Path(__file__).resolve().parents[1]
-_TICK_SRC = _REPO_ROOT / "bin" / "tick.py"
+_TICK_SRC = _REPO_ROOT / "arunner" / "engine" / "tick.py"
 # The harness core files audited for cp1252 safety.
 _NEW_FILES = tuple(
-    _REPO_ROOT / "bin" / n
+    _REPO_ROOT / "arunner" / "engine" / n
     for n in ("tick.py", "ticker.py", "heartbeat.py", "demo_worker.py"))
 
 

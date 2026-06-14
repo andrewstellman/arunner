@@ -1,8 +1,8 @@
 """v1.5.9 Phase 2B — generic heartbeat helper + demo worker (FR-18..21).
 
-bin/heartbeat.py is the payload-agnostic heartbeat core (label is a
+arunner/engine/heartbeat.py is the payload-agnostic heartbeat core (label is a
 FREE STRING, no phase_identity / run_state coupling — FR-18) that extracts
-to the standalone repo. bin/demo_worker.py is the cross-platform
+to the standalone repo. arunner/engine/demo_worker.py is the cross-platform
 stub (FR-31). This pins: JSON-encoding of every value (FR-19), free-string
 label, schema_version "2", the opaque `data` escape hatch, keepalive-reuses-
 last-label (incl. Postel fall-back to a v1 `phase`), the E6 loud-nonzero
@@ -27,8 +27,8 @@ from pathlib import Path
 
 
 _REPO_ROOT = Path(__file__).resolve().parents[1]
-_HB = _REPO_ROOT / "bin" / "heartbeat.py"
-_DEMO = _REPO_ROOT / "bin" / "demo_worker.py"
+_HB = _REPO_ROOT / "arunner" / "engine" / "heartbeat.py"
+_DEMO = _REPO_ROOT / "arunner" / "engine" / "demo_worker.py"
 
 
 def _load(name, path):

@@ -5,7 +5,7 @@ runs against these, so they pin **current** behaviour. Two disciplines keep
 the suite trustworthy:
 
 1. **Ticker-driven, never the agent loop.** Scenarios run via
-   `bin/ticker.py --once` in a loop (`runner.py`), so a run is reproducible and
+   `arunner/engine/ticker.py --once` in a loop (`runner.py`), so a run is reproducible and
    CI-able and the flaky Class-C path never enters the regression net.
 2. **Independent verdict.** The pass/fail check (`checker.py`) is plain Python
    that **imports the standard library only** — never the `arunner` package.

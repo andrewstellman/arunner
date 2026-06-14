@@ -1,6 +1,6 @@
 """Ticker-driven scenario runner for the integration suite (FR-51).
 
-Drives a scenario with the DETERMINISTIC ticker (`bin/ticker.py --once` in a
+Drives a scenario with the DETERMINISTIC ticker (`arunner/engine/ticker.py --once` in a
 loop) -- never the agent loop -- so a run is reproducible and the flaky
 Class-C path never enters the regression net. Records a ``_check_meta.json``
 in the run-dir (per-tick trace + the pre-STOP snapshot + the stopped flag) for
@@ -26,8 +26,8 @@ from pathlib import Path
 
 _HERE = Path(__file__).resolve().parent
 _ROOT = _HERE.parents[1]
-_TICKER = _ROOT / "bin" / "ticker.py"
-_ENGINE = _ROOT / "bin" / "tick.py"
+_TICKER = _ROOT / "arunner" / "engine" / "ticker.py"
+_ENGINE = _ROOT / "arunner" / "engine" / "tick.py"
 _STUB = _HERE / "stub_worker.py"
 _MAX_TICKS = 60
 
@@ -126,7 +126,7 @@ def run_scenario(scenario_dir, work_dir):
     work_dir = Path(work_dir)
     scn = json.loads((scenario_dir / "scenario.json").read_text(encoding="utf-8"))
     plan = _substitute(scn["plan"], {"{STUB}": str(_STUB),
-                                     "{HEARTBEAT_BIN}": str(_ROOT / "bin" / "heartbeat.py"),
+                                     "{HEARTBEAT_BIN}": str(_ROOT / "arunner" / "engine" / "heartbeat.py"),
                                      "{SCENARIO_DIR}": str(scenario_dir)})
     plan_path = work_dir / "plan.json"
     plan_path.write_text(json.dumps(plan), encoding="utf-8")
