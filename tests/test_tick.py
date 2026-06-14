@@ -135,14 +135,17 @@ class TickOutputShapeTests(_Base):
     def test_tick_returns_expected_keys(self):
         rd = self._init(_plan([_entry("t-1")]))
         out = T.tick(rd)
-        # instr 019 added `paused` (FR-36) to the tick envelope.
+        # instr 019 added `paused` (FR-36); instr 036 added `continuation`
+        # (FR-55, the per-tick verdict) to the tick envelope.
         self.assertEqual(set(out), {"dispatch_list", "status_table",
                                     "next_tick_minutes", "done", "stop",
-                                    "paused"})
+                                    "paused", "continuation"})
         self.assertIsInstance(out["dispatch_list"], list)
         self.assertIsInstance(out["status_table"], str)
         self.assertIsInstance(out["next_tick_minutes"], int)
         self.assertIsInstance(out["paused"], bool)
+        self.assertIsInstance(out["continuation"], dict)
+        self.assertIn(out["continuation"]["verdict"], ("CONTINUE", "HALT"))
 
     def test_dispatch_prompt_placeholders_resolved_absolute(self):
         rd = self._init(_plan([_entry("t-1", "/tmp/target-x")]))

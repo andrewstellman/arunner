@@ -751,6 +751,132 @@ def _write_summary(run_dir: Path, status: dict) -> None:
     (run_dir / "SUMMARY.md").write_text(_render_summary_md(payload), encoding="utf-8")
 
 
+# --- FR-55: the continuation contract (autonomy integrity) ------------------
+# Every tick the engine emits a deterministic continuation VERDICT = a pure
+# function of run-dir state, so the orchestrating host READS the continue/stop
+# decision rather than AUTHORING it. The closed halt set keeps "why we stopped"
+# auditable; an independent checker (FR-51) cross-checks the host's yield
+# records against the engine's recorded verdict. The failure is caught
+# POST-HOC, not prevented — see UC-11 / docs/INTEGRATION_TEST_PLAN.md.
+_CONTINUATION_REASONS = frozenset((
+    "done", "failed", "stop", "pause", "cancel", "blocked",
+    "stalled", "budget", "internal_error"))
+
+
+def _open_blockers(run_dir: Path) -> list:
+    """Host-authored blocker records under ``<run_dir>/blockers/*.json``. A
+    blocker ``{id, created_at, reason, cleared_at}`` is OPEN while ``cleared_at``
+    is null. The engine only READS these (host-authored per FR-55), so its
+    per-tick status write can never clobber an operator's blocker."""
+    out = []
+    bdir = run_dir / "blockers"
+    if bdir.is_dir():
+        for bf in sorted(bdir.glob("*.json")):
+            try:
+                obj = json.loads(bf.read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                continue
+            if isinstance(obj, dict) and not obj.get("cleared_at"):
+                out.append(obj)
+    return out
+
+
+def _halt_reason(run_dir: Path, status: dict, stop: bool):
+    """The single HALT reason (closed set ``_CONTINUATION_REASONS``) for this
+    tick, or ``None`` for CONTINUE. Reads PERSISTED status (paused / terminal
+    states / blocker records), not raw control-file presence — FR-35 consumes
+    control files once persisted (a consumed PAUSE leaves ``paused: true`` and
+    no file). STOP is the deliberate exception: it is never consumed (a
+    read-only gate, FR-10), so the STOP file IS the truth and ``stop`` carries
+    it. ``cancel``/``budget`` read persisted flags; ``internal_error`` is the
+    catch-all the caller sets on a fault, keeping the set closed."""
+    runs = status.get("runs") or {}
+    states = [r.get("state") for r in runs.values()]
+    # operator control states dominate a still-live run
+    if stop or status.get("stopped"):
+        return "stop"
+    if status.get("cancelled"):
+        return "cancel"
+    # a finished run is done/failed regardless of any stale pause/blocker
+    if states and all(s in _TERMINAL_STATES for s in states):
+        return "done" if all(s == "completed" for s in states) else "failed"
+    # an open operator-decision gate suspends an otherwise-healthy run
+    if _open_blockers(run_dir):
+        return "blocked"
+    if status.get("paused"):
+        return "pause"
+    if status.get("budget_exhausted"):
+        return "budget"
+    # progress still possible? a wedge = non-terminal but nothing can advance:
+    # every non-terminal run is stalled AND no free pool slot can dispatch a
+    # queued run (FR-55 `stalled` — the non-killable wedge; operator out: CANCEL)
+    non_terminal = [s for s in states if s not in _TERMINAL_STATES]
+    if non_terminal:
+        progressing = any(s in ("running", "claimed") for s in non_terminal)
+        queued = sum(1 for s in non_terminal if s == "queued")
+        inflight = sum(1 for s in non_terminal
+                       if s in ("claimed", "running", "stalled"))
+        pool = status.get("pool_size") or 0
+        free_slot = queued > 0 and (pool - inflight) > 0
+        if (not progressing and not free_slot
+                and any(s == "stalled" for s in non_terminal)):
+            return "stalled"
+    return None
+
+
+def _continuation(run_dir: Path, status: dict, stop: bool, now: float,
+                  next_minutes) -> dict:
+    """The per-tick continuation object — a pure function of run-dir state:
+    ``{verdict, reason?, blocker_id?, next_tick_due, monitoring_paused}``.
+    CONTINUE iff non-terminal ∧ status not stopped/cancelled/paused ∧ no open
+    blocker ∧ progress possible; else ``HALT`` with a closed-set ``reason``."""
+    try:
+        reason = _halt_reason(run_dir, status, stop)
+    except Exception:                       # a fault keeps the set closed
+        reason = "internal_error"
+    cont = {"monitoring_paused": bool(status.get("monitoring_paused", False))}
+    try:
+        cont["next_tick_due"] = int(round(now + float(next_minutes) * 60))
+    except (TypeError, ValueError):
+        cont["next_tick_due"] = None
+    if reason is None:
+        cont["verdict"] = "CONTINUE"
+    else:
+        cont["verdict"] = "HALT"
+        cont["reason"] = reason
+        if reason == "blocked":
+            opn = _open_blockers(run_dir)
+            if opn:
+                cont["blocker_id"] = opn[0].get("id")
+    return cont
+
+
+def _verdict_str(cont: dict) -> str:
+    """Canonical verdict string for cross-checking a yield: ``CONTINUE`` or
+    ``HALT:<reason>`` (the blocker class is ``HALT:blocked``; the id is in the
+    record + ``blocker_id``)."""
+    if not cont or cont.get("verdict") == "CONTINUE":
+        return "CONTINUE"
+    return "HALT:" + str(cont.get("reason", "internal_error"))
+
+
+def _append_journal(run_dir: Path, cont: dict, cycle: int) -> None:
+    """Append the engine's per-tick verdict line to the append-only
+    ``journal.ndjson``. (The host appends its own ``yield`` records; the engine
+    never writes those.) Best-effort: a journal write must never crash a tick."""
+    line = {"ts": _utc_iso(), "tick": cycle, "type": "verdict",
+            "verdict": _verdict_str(cont),
+            "next_tick_due": cont.get("next_tick_due"),
+            "monitoring_paused": cont.get("monitoring_paused", False)}
+    if cont.get("reason"):
+        line["reason"] = cont["reason"]
+    try:
+        with (run_dir / "journal.ndjson").open("a", encoding="utf-8") as fh:
+            fh.write(json.dumps(line) + "\n")
+    except OSError:
+        pass
+
+
 def tick(run_dir: Path) -> dict:
     status = json.loads((run_dir / "harness_status.json").read_text(encoding="utf-8"))
     plan = json.loads((run_dir / "plan.json").read_text(encoding="utf-8"))
@@ -830,16 +956,25 @@ def tick(run_dir: Path) -> dict:
         next_minutes = (_POLL_NOW_CADENCE_MINUTES if poll_now
                         else _next_cadence(status, tick_interval, idle_mult))
         status["next_tick_minutes"] = next_minutes
+        # FR-55: the deterministic continuation verdict, computed from the
+        # now-updated status (right after `done` is set), persisted on disk and
+        # journaled so an independent reader can audit the continue/stop decision.
+        cont = _continuation(run_dir, status, stop, now, next_minutes)
+        status["continuation"] = cont
         # strip transient field, then persist
         for r in runs.values():
             r.pop("_run_name", None)
         _write_json(run_dir / "harness_status.json", status)
+        _append_journal(run_dir, cont, status["cycle"])
     else:
         for r in runs.values():
             r.pop("_run_name", None)
         # STOP tick is read-only: don't re-persist. Report the cadence the
         # already-persisted state implies (no POLL-NOW on a STOP tick).
         next_minutes = _next_cadence(status, tick_interval, idle_mult)
+        # FR-55: still EMIT the verdict (HALT:stop) for the trace/return, but a
+        # STOP tick writes nothing (read-only) — no status persist, no journal.
+        cont = _continuation(run_dir, status, stop, now, next_minutes)
 
     done = status["done"]
     table = _format_table(run_dir, status, plan, terminal=(done or stop))
@@ -850,6 +985,7 @@ def tick(run_dir: Path) -> dict:
         "done": done,
         "stop": stop,
         "paused": bool(status.get("paused")),
+        "continuation": cont,
     }
 
 
