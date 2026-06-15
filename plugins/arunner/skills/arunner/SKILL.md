@@ -101,7 +101,7 @@ string and fails.
 3. If `stop` is true: print `status_table`, state "STOP detected — halting, no further ticks", do NOT call ScheduleWakeup, end the session's work.
 4. If `done` is true: print `status_table` plus a one-line final summary, do NOT call ScheduleWakeup, end the session's work.
 5. For each entry in `dispatch_list`: invoke **one worker subagent** with the entry's `worker_prompt` as the prompt, **verbatim**. Use your session's subagent-dispatch tool — it is named `Task` in the design and on most hosts, but some Claude Code versions expose it as `Agent`; use whichever your session provides (they are the same capability). The subagent launches a detached worker and returns a single summary line; accept it and move on — do not wait for it beyond its return, and do not read its heartbeat yourself.
-6. Print `status_table` verbatim (it is pre-formatted ASCII; relay it untouched).
+6. **Print `status_table` verbatim as a visible message — EVERY tick (FR-58b, NON-NEGOTIABLE).** It is pre-formatted ASCII; relay it untouched, as normal assistant output the operator sees. Do NOT capture it into a variable and check it silently, do NOT suppress it, and do NOT bury the ticker inside one collapsed bash block that swallows the per-tick tables. The operator monitors the run by watching this table move each tick (the `RUN / STATE / ACTIVITY / LAST-HB` columns) — a tick that grades the disk but never surfaces the table has skipped the lived monitoring the harness exists to provide.
 7. Call `ScheduleWakeup(now + next_tick_minutes minutes)`. End the agent turn.
 
 ## What you do NOT do
@@ -140,6 +140,27 @@ the operator then has to manually restart you. The rules:
 
 Checklist to run at the end of every tick: **"Did I call ScheduleWakeup OR
 was this a clean exit (done/STOP)? If neither, call ScheduleWakeup now."**
+
+## Visible-table discipline (NON-NEGOTIABLE — FR-58b, hardening FR-27/UC-2)
+
+The engine already formats a `status_table` every tick (FR-5/FR-27); the
+operator's ability to *monitor* depends on you SURFACING it. The failure mode is
+behavioral, not engine: an agent that runs the ticker in one collapsed bash
+block, or captures the tick's stdout into a variable and only checks `done`,
+produces zero visible tables — the operator is flying blind. The rules:
+
+1. **Every tick prints `status_table` as a visible assistant message** — the
+   idle ticks too (an unchanged table is still the monitoring signal). It is the
+   lived UC-2 experience; FR-58a only makes the ACTIVITY column *move* faster,
+   it does nothing for visibility if you never print the table.
+2. **Never suppress or capture-and-hide it.** No `R=$(… tick.py …)` that checks
+   `R` silently; no `2>/dev/null` swallowing; no one-shot ticker loop whose
+   per-tick output never reaches the conversation.
+3. **One tick = one visible table.** If you batch ticks, each must surface its
+   own table; collapsing N ticks into one silent block defeats the purpose.
+
+This is a per-host **agent-rung** behavior (DESIGNED, NFR-12) — it is NOT
+verified by any engine test, and a green FR-58a engine test does not satisfy it.
 
 ## Operator override
 

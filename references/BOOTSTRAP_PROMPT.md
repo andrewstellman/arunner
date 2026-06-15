@@ -55,8 +55,10 @@ Do this now:
    `worker_prompt` verbatim — use your session's subagent-dispatch tool,
    `Task` or `Agent`). A `dispatch_mode: "shell"` entry is NOT yours to
    launch in-session — if you see one, stop and print the ticker command
-   per step 1b. Then print `status_table` verbatim, call
-   `ScheduleWakeup(now + next_tick_minutes minutes)`, and end the turn.
+   per step 1b. Then print `status_table` verbatim **as a visible message
+   every tick** (FR-58b, NON-NEGOTIABLE — never capture-and-hide it or bury
+   the ticker in one collapsed block; the operator monitors by watching it),
+   call `ScheduleWakeup(now + next_tick_minutes minutes)`, and end the turn.
 4. On every wakeup, run the per-tick sequence again. Continue until the
    script's JSON reports `done: true` or `stop: true`, then print the
    status table and exit cleanly WITHOUT calling ScheduleWakeup.
