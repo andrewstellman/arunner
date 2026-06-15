@@ -192,6 +192,81 @@ def cmd_expand(args) -> int:
     return JOBS.main(jargs)
 
 
+# Plan-level config carried into the add --check probe so the new entries are
+# validated against the SAME knobs the live run uses (keepalive>grace etc.).
+_ADD_PROBE_KEYS = ("schema_version", "tick_interval_minutes", "pool_size",
+                   "stall_threshold_minutes", "launch_grace_minutes",
+                   "idle_tick_multiplier", "keepalive_seconds")
+
+
+def cmd_add(args) -> int:
+    """FR-57 live enqueue (stage-and-absorb): validate the new entries (--check,
+    FR-42) and STAGE them to <run-dir>/incoming/ -- never mutate the live
+    plan.json / harness_status.json a concurrent tick reads/writes. The next
+    tick absorbs incoming/ under the lock it already holds."""
+    run_dir = Path(args.run_dir)
+    if not (run_dir / "harness_status.json").is_file():
+        print("arunner add: not a run-dir (no harness_status.json): %s" % run_dir,
+              file=sys.stderr)
+        return 2
+    live_plan = json.loads((run_dir / "plan.json").read_text(encoding="utf-8"))
+    source = args.file or "--command"
+
+    if args.command:
+        import shlex
+        cmd = shlex.split(args.command)
+        if not cmd:
+            print("arunner add: --command needs a command", file=sys.stderr)
+            return 2
+        entries = [{"target_repo": args.repo, "dispatch_mode": "shell",
+                    "adapter": "wrap", "command": cmd}]
+    elif args.file:
+        doc = json.loads(Path(args.file).read_text(encoding="utf-8"))
+        entries = list(_resolve_plan(doc).get("entries") or [])
+    else:
+        print("arunner add: give a plan/jobs file or --command <cmd ...>",
+              file=sys.stderr)
+        return 2
+    if not entries:
+        print("arunner add: no entries to add", file=sys.stderr)
+        return 2
+
+    # Mint task_id for any entry lacking one, numbered append-only from the live
+    # entry count, so the --check pre-gate (which requires task_id) passes and
+    # the absorb keeps the same ids.
+    base = len(live_plan.get("entries") or [])
+    for j, e in enumerate(entries):
+        if isinstance(e, dict) and not e.get("task_id"):
+            e["task_id"] = "added-%02d" % (base + j + 1)
+
+    # --check PRE-GATE (FR-42): validate the new entries against the live plan's
+    # knobs BEFORE anything lands in incoming/. A bad add never reaches a tick.
+    probe = {k: live_plan[k] for k in _ADD_PROBE_KEYS if k in live_plan}
+    probe["entries"] = entries
+    if args.pool is not None:
+        probe["pool_size"] = args.pool
+    tmp = Path(tempfile.mkdtemp()) / "add_probe.json"
+    tmp.write_text(json.dumps(probe), encoding="utf-8")
+    problems = TICK.check_plan(tmp)
+    if problems:
+        print(TICK._format_check_report(source, problems))
+        return 1
+
+    # Stage to incoming/ (the tick absorbs it). Unique filename so concurrent
+    # adds never clobber one another.
+    inc = run_dir / "incoming"
+    inc.mkdir(exist_ok=True)
+    payload = {"entries": entries}
+    if args.pool is not None:
+        payload["pool_size"] = args.pool
+    n = len(list(inc.glob("add-*.json")))
+    staged = inc / ("add-%03d-%d.json" % (n, abs(hash(source)) % 100000))
+    staged.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
+    print("arunner: staged %d entr%s to %s (absorbed on the next tick)"
+          % (len(entries), "y" if len(entries) == 1 else "ies", staged))
+    return 0
+
+
 def _build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="arunner", description=__doc__.split("\n")[0])
     p.add_argument("--version", action="version", version="arunner %s" % __version__,
@@ -224,12 +299,25 @@ def _build_parser() -> argparse.ArgumentParser:
 
     pv = sub.add_parser("preview", help="per-job dispatch + source + --check (FR-52)")
     pv.add_argument("file")
+
+    ad = sub.add_parser("add", help="live enqueue: stage new jobs into a running "
+                                    "run-dir, absorbed next tick (FR-57)")
+    ad.add_argument("run_dir")
+    ad.add_argument("file", nargs="?", default=None,
+                    help="a plan / jobs shorthand whose entries to add")
+    ad.add_argument("--command", default=None,
+                    help="add a single wrap-adapter job from a shell command "
+                         "string, e.g. --command 'make test'")
+    ad.add_argument("--pool", type=int, default=None,
+                    help="raise the live pool_size as part of this add")
+    ad.add_argument("--repo", default=".",
+                    help="target_repo for a --command job (default: .)")
     return p
 
 
 _DISPATCH = {"run": cmd_run, "status": cmd_status, "stop": cmd_stop,
              "resume": cmd_resume, "summary": cmd_summary, "new": cmd_new,
-             "expand": cmd_expand, "preview": cmd_preview}
+             "expand": cmd_expand, "preview": cmd_preview, "add": cmd_add}
 
 
 def main(argv=None) -> int:

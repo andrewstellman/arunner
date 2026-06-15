@@ -200,6 +200,100 @@ def _cfg(plan: dict, key: str, default):
 
 # --- init -------------------------------------------------------------------
 
+def _scaffold_run(run_dir: Path, run_name: str, job_id: str, entry: dict) -> dict:
+    """Scaffold ONE run-NN (heartbeat file, manifest, queue claim token) and
+    return its ``queued`` runs-record. The single source of truth for the
+    per-run on-disk shape, shared by ``init_run`` (the initial batch) and
+    ``_absorb_incoming`` (FR-57 live adds) so they can never drift."""
+    rd = run_dir / run_name
+    rd.mkdir(exist_ok=True)
+    (rd / "heartbeat.ndjson").touch()
+    manifest = {
+        "task_id": entry.get("task_id"),
+        "target_repo": entry.get("target_repo"),
+        "dispatch_mode": entry.get("dispatch_mode", "subagent"),
+        "run": run_name,
+        "job_id": job_id,
+    }
+    # FR-20: a plan entry MAY point the harness at a heartbeat file the
+    # job already writes (absolute). Recorded here so _heartbeat_path
+    # watches it instead of the run-dir default.
+    if entry.get("heartbeat_path"):
+        manifest["heartbeat_path"] = entry["heartbeat_path"]
+    _write_json(rd / "manifest.json", manifest)
+    _write_json(run_dir / "queue" / (job_id + ".json"),
+                {"job_id": job_id, "run": run_name, "entry": entry})
+    return {
+        "task_id": entry.get("task_id"),
+        "job_id": job_id,
+        "target_repo": entry.get("target_repo"),
+        "state": "queued",
+        "last_hb_status": None,
+        "claimed_at": None,
+    }
+
+
+def _absorb_incoming(run_dir: Path) -> int:
+    """FR-57 stage-and-absorb: at the START of a tick (under the ``.tick.lock``
+    the caller already holds) append any entries staged in ``<run-dir>/incoming/``
+    to ``plan.json["entries"]``, scaffold each new ``run-NN`` + a ``queued``
+    record in ``harness_status.json["runs"]`` (mirroring ``init_run``), then
+    retire the absorbed file. Race-free by construction: ``add`` only ever
+    writes ``incoming/`` -- never the live files a concurrent tick reads/writes.
+
+    Disciplines (FR-57): APPEND-ONLY positional numbering (new ``run-NN`` continue
+    from the current entry count -- a renumber or ``len(entries)``<->``runs``
+    mismatch is silently swallowed by the tick's ``except``); ``task_id`` minted
+    if absent; placeholders stored UNRESOLVED (dispatch-time substitution handles
+    them); NO ``done`` write -- the new ``queued`` run re-activates an idle run on
+    this very tick (``done`` is recomputed below). Returns the count absorbed."""
+    inc = run_dir / "incoming"
+    if not inc.is_dir():
+        return 0
+    staged = sorted(p for p in inc.iterdir()
+                    if p.is_file() and p.suffix == ".json")
+    if not staged:
+        return 0
+    plan = json.loads((run_dir / "plan.json").read_text(encoding="utf-8"))
+    status = json.loads((run_dir / "harness_status.json").read_text(encoding="utf-8"))
+    entries = plan.setdefault("entries", [])
+    runs = status["runs"]
+    added = 0
+    for sp in staged:
+        try:
+            payload = json.loads(sp.read_text(encoding="utf-8"))
+        except ValueError:
+            _log(run_dir, "absorb: skipping malformed incoming %s" % sp.name)
+            sp.unlink()
+            continue
+        new_entries = (payload.get("entries") if isinstance(payload, dict)
+                       else payload)
+        pool = payload.get("pool_size") if isinstance(payload, dict) else None
+        for entry in (new_entries or []):
+            if not isinstance(entry, dict):
+                continue
+            idx = len(entries) + 1                      # APPEND-ONLY, positional
+            run_name = "run-%02d" % idx
+            job_id = "job-%05d" % idx
+            if not entry.get("task_id"):
+                entry = dict(entry, task_id="added-%02d" % idx)   # mint if absent
+            entries.append(entry)                        # placeholders UNRESOLVED
+            runs[run_name] = _scaffold_run(run_dir, run_name, job_id, entry)
+            added += 1
+        if pool:
+            status["pool_size"] = max(int(status.get("pool_size") or 0), int(pool))
+        sp.unlink()                                      # retire the absorbed file
+    if added:
+        status["counts"] = _recount(runs)
+        # NO `done` write: a freshly-queued run re-activates the batch; `done`
+        # is recomputed by the tick that called us.
+        _write_json(run_dir / "plan.json", plan)
+        _write_json(run_dir / "harness_status.json", status)
+        _log(run_dir, "absorb: +%d run(s) from incoming/ (now %d entr%s)"
+             % (added, len(entries), "y" if len(entries) == 1 else "ies"))
+    return added
+
+
 def init_run(plan_path: Path) -> Path:
     plan = json.loads(plan_path.read_text(encoding="utf-8"))
     entries = plan.get("entries") or []
@@ -217,32 +311,7 @@ def init_run(plan_path: Path) -> Path:
     for i, entry in enumerate(entries, start=1):
         run_name = "run-%02d" % i
         job_id = "job-%05d" % i
-        rd = run_dir / run_name
-        rd.mkdir()
-        (rd / "heartbeat.ndjson").touch()
-        manifest = {
-            "task_id": entry.get("task_id"),
-            "target_repo": entry.get("target_repo"),
-            "dispatch_mode": entry.get("dispatch_mode", "subagent"),
-            "run": run_name,
-            "job_id": job_id,
-        }
-        # FR-20: a plan entry MAY point the harness at a heartbeat file the
-        # job already writes (absolute). Recorded here so _heartbeat_path
-        # watches it instead of the run-dir default.
-        if entry.get("heartbeat_path"):
-            manifest["heartbeat_path"] = entry["heartbeat_path"]
-        _write_json(rd / "manifest.json", manifest)
-        _write_json(run_dir / "queue" / (job_id + ".json"),
-                    {"job_id": job_id, "run": run_name, "entry": entry})
-        runs[run_name] = {
-            "task_id": entry.get("task_id"),
-            "job_id": job_id,
-            "target_repo": entry.get("target_repo"),
-            "state": "queued",
-            "last_hb_status": None,
-            "claimed_at": None,
-        }
+        runs[run_name] = _scaffold_run(run_dir, run_name, job_id, entry)
     _write_json(run_dir / "plan.json", plan)
     _write_json(run_dir / "harness_status.json", {
         "cycle": 0,
@@ -878,6 +947,9 @@ def _append_journal(run_dir: Path, cont: dict, cycle: int) -> None:
 
 
 def tick(run_dir: Path) -> dict:
+    # FR-57: absorb any live-staged adds FIRST, under the caller's .tick.lock,
+    # so the positional work-table rebuild below sees the appended entries.
+    _absorb_incoming(run_dir)
     status = json.loads((run_dir / "harness_status.json").read_text(encoding="utf-8"))
     plan = json.loads((run_dir / "plan.json").read_text(encoding="utf-8"))
     runs = status["runs"]
