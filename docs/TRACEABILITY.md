@@ -29,8 +29,9 @@
 | UC-10 | Conversational build | describe → preview → run → persist a session in natural language | in-agent | `test_preview`, `test_cli_journey` | per-agent (Claude Code verified; others DESIGNED) | TO BUILD |
 | UC-11 | Unattended run resists stop-pressure | drives a long stub run; the continuation contract holds; the journal is audited for `CONTINUE`-state yields | in-agent | `continuation_*` (7) + 3-class detector | per-agent | TO BUILD (live audit) |
 | UC-12 | Activity patterns from a noisy tool | runs a wrap/tail job with `adapter_activity_patterns` over noisy output; confirms ACTIVITY shows the relevant line | in-agent + ticker | `sim_wrap_log_noise`, `sim_tail_log_noise`, `test_activity_patterns` | per-OS | TO BUILD |
+| UC-13 | Chat-driven generation (message channel) | a chat drives a *running* tick loop via `arunner msg`: `run-batch`/`enqueue` → `snapshot` → read `outbox` → `dispatch-job` → decide → next, all without restarting; messages are acked + idempotent, results correlate id↔task_id | in-agent + sidecar | `test_message_channel` (idempotency-ledger, read-only-never-writes pins; ack/result lifecycle) | per-agent | **VERIFIED** (engine/CLI leg; live chat-driven run = operator) |
 
-User stories cluster onto the same use cases: US-1→UC-1, US-2→UC-2, US-3→UC-3, US-4→UC-4, US-5→UC-5, US-6→UC-5/adapters, US-7→UC-1 on a small model (recorded), US-8→UC-8, US-9→every run's disk record, US-10→the §9/`test_positioning_honesty` honesty surface, US-11→UC-11, US-12→UC-12, US-13→UC-1, US-14→UC-2, US-15→UC-2 (read-only monitor sidecar).
+User stories cluster onto the same use cases: US-1→UC-1, US-2→UC-2, US-3→UC-3, US-4→UC-4, US-5→UC-5, US-6→UC-5/adapters, US-7→UC-1 on a small model (recorded), US-8→UC-8, US-9→every run's disk record, US-10→the §9/`test_positioning_honesty` honesty surface, US-11→UC-11, US-12→UC-12, US-13→UC-1, US-14→UC-2, US-15→UC-2 (read-only monitor sidecar), US-16→UC-13 (chat⇄runner message channel).
 
 ## What "TO BUILD" means here
 
