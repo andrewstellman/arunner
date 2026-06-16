@@ -295,6 +295,268 @@ def _absorb_incoming(run_dir: Path) -> int:
     return added
 
 
+# --- FR-60: chat <-> runner message channel (typed inbox/outbox) -----------
+# A typed, acknowledged, idempotent control channel: the chat drops
+# <run-dir>/inbox/<id>.json; the engine DRAINS the inbox at the start of each
+# tick UNDER the .tick.lock it already holds (mirroring the FR-57 incoming/
+# absorb), processes each message idempotently (a processed-ids ledger makes a
+# replayed/crashed drain a no-op), and writes an ACK (and later a RESULT) to the
+# append-only outbox. Closed verb set only; read-only verbs mutate no run state;
+# local-disk only (NO network listener); worker_prompts are passed to subagents
+# as DATA, never shell-evaluated. The engine is a generic message->dispatch
+# relay -- higher-level loop semantics live in the chat + the job prompts.
+_MSG_VERBS = ("enqueue", "control", "dispatch-job", "run-batch", "snapshot", "note")
+_CONTROL_OPS = ("pause", "resume", "cadence", "poll-now", "cancel")
+
+
+def _outbox_dir(run_dir: Path) -> Path:
+    ob = run_dir / "outbox"
+    ob.mkdir(exist_ok=True)
+    return ob
+
+
+def _write_ack(run_dir: Path, mid: str, status: str, reason=None, task_ids=None):
+    """Append-only ack (never mutated in place): received -> applied/rejected."""
+    _write_json(_outbox_dir(run_dir) / (mid + ".ack.json"), {
+        "message_id": mid, "status": status, "reason": reason,
+        "task_ids": list(task_ids or []), "ts": _utc_iso()})
+
+
+def _processed_ids(run_dir: Path) -> set:
+    p = run_dir / "inbox" / ".processed"
+    if not p.is_file():
+        return set()
+    return set(x.strip() for x in p.read_text(encoding="utf-8").splitlines()
+               if x.strip())
+
+
+def _mark_processed(run_dir: Path, mid: str) -> None:
+    with (run_dir / "inbox" / ".processed").open("a", encoding="utf-8") as fh:
+        fh.write(mid + "\n")
+
+
+def _load_pending(run_dir: Path) -> dict:
+    p = run_dir / "outbox" / ".pending.json"
+    try:
+        return json.loads(p.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+
+
+def _check_message(msg) -> list:
+    """--check an inbound message (FR-42): closed verb + well-formed args. A
+    malformed/unknown message is rejected in its ack and never crashes the tick."""
+    if not isinstance(msg, dict):
+        return ["message must be a JSON object"]
+    p = []
+    if not (isinstance(msg.get("id"), str) and msg["id"]):
+        p.append("message missing a string 'id'")
+    verb = msg.get("verb")
+    if verb not in _MSG_VERBS:
+        return p + ["unknown verb %r (allowed: %s)"
+                    % (verb, ", ".join(_MSG_VERBS))]
+    args = msg.get("args") or {}
+    if not isinstance(args, dict):
+        return p + ["'args' must be an object"]
+    if verb == "enqueue":
+        if not (isinstance(args.get("entries"), list) and args["entries"]):
+            p.append("enqueue requires non-empty args.entries[]")
+    elif verb == "run-batch":
+        if not (args.get("batch") or (isinstance(args.get("entries"), list)
+                                      and args["entries"])):
+            p.append("run-batch requires args.batch (name) or args.entries[]")
+    elif verb == "dispatch-job":
+        if not (isinstance(args.get("worker_prompt"), str) and args["worker_prompt"]):
+            p.append("dispatch-job requires args.worker_prompt (non-empty string)")
+    elif verb == "control":
+        op = args.get("op")
+        if op not in _CONTROL_OPS:
+            p.append("control.op must be one of %s" % ", ".join(_CONTROL_OPS))
+        elif op == "cadence" and not _is_pos_int(args.get("minutes")):
+            p.append("control cadence requires args.minutes (integer >= 1)")
+        elif op == "cancel" and not args.get("task"):
+            p.append("control cancel requires args.task")
+    return p
+
+
+def _msg_entries(run_dir: Path, msg: dict) -> list:
+    """The plan entries a job-staging verb contributes (placeholders UNRESOLVED)."""
+    verb = msg["verb"]
+    args = msg.get("args") or {}
+    if verb == "enqueue":
+        return list(args.get("entries") or [])
+    if verb == "dispatch-job":
+        e = {"target_repo": args.get("target_repo", "."),
+             "dispatch_mode": "subagent", "worker_prompt": args["worker_prompt"]}
+        if args.get("task_id"):
+            e["task_id"] = args["task_id"]
+        return [e]
+    if verb == "run-batch":
+        if isinstance(args.get("entries"), list):
+            return list(args["entries"])
+        bf = run_dir / "batches" / (str(args.get("batch")) + ".json")
+        try:
+            doc = json.loads(bf.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return []
+        return list(doc.get("entries") or [])
+    return []
+
+
+def _process_message(run_dir, msg, plan, status):
+    """Apply ONE validated message. Returns (status, reason, task_ids, runs).
+    Mutates plan/status in place for job-staging verbs (the caller persists)."""
+    verb = msg["verb"]
+    args = msg.get("args") or {}
+    if verb in ("enqueue", "dispatch-job", "run-batch"):
+        entries = _msg_entries(run_dir, msg)
+        if not entries:
+            return "rejected", "no entries to stage", [], []
+        # --check the synthesized entries against the live plan's knobs BEFORE
+        # they touch the work table (FR-42); a bad spec never lands.
+        probe = {k: plan[k] for k in _PLAN_INT_KEYS if k in plan}
+        probe["entries"] = entries
+        base = len(plan.get("entries") or [])
+        for j, e in enumerate(entries):
+            if isinstance(e, dict) and not e.get("task_id"):
+                e["task_id"] = "msg-%02d" % (base + j + 1)
+        import tempfile as _tmp
+        tp = Path(_tmp.mkdtemp()) / "probe.json"
+        tp.write_text(json.dumps(probe), encoding="utf-8")
+        probs = check_plan(tp)
+        if probs:
+            return "rejected", "; ".join(probs), [], []
+        pentries = plan.setdefault("entries", [])
+        runs = status["runs"]
+        spawned, task_ids = [], []
+        for e in entries:
+            idx = len(pentries) + 1                    # APPEND-ONLY, positional
+            run_name = "run-%02d" % idx
+            job_id = "job-%05d" % idx
+            pentries.append(e)                          # placeholders UNRESOLVED
+            runs[run_name] = _scaffold_run(run_dir, run_name, job_id, e)
+            spawned.append(run_name)
+            task_ids.append(e.get("task_id"))
+        return "applied", None, task_ids, spawned
+    if verb == "control":
+        op = args["op"]
+        if op == "pause":
+            (run_dir / "PAUSE").write_text("", encoding="utf-8")
+        elif op == "resume":
+            (run_dir / "RESUME").write_text("", encoding="utf-8")
+        elif op == "poll-now":
+            (run_dir / "POLL-NOW").write_text("", encoding="utf-8")
+        elif op == "cadence":
+            (run_dir / "CADENCE").write_text(str(args["minutes"]), encoding="utf-8")
+        elif op == "cancel":
+            (run_dir / "CANCEL").write_text(str(args["task"]), encoding="utf-8")
+        return "applied", "control:%s" % op, [], []
+    if verb == "snapshot":
+        # READ-ONLY: render the CURRENT (last-tick) state to the outbox; mutate
+        # no run state.
+        table = _format_table(run_dir, status, plan,
+                              terminal=bool(status.get("done")))
+        run_states = {n: r.get("state") for n, r in status.get("runs", {}).items()}
+        _write_json(_outbox_dir(run_dir) / (msg["id"] + ".result.json"), {
+            "message_id": msg["id"], "verb": "snapshot",
+            "status_table": table, "counts": status.get("counts", {}),
+            "run_states": run_states, "done": bool(status.get("done")),
+            "ts": _utc_iso()})
+        return "applied", "snapshot emitted", [], []
+    if verb == "note":
+        # AUDIT only, no action: append to the journal.
+        with (run_dir / "journal.ndjson").open("a", encoding="utf-8") as fh:
+            fh.write(json.dumps({"type": "note", "message_id": msg["id"],
+                                 "note": args.get("text", ""),
+                                 "ts": _utc_iso()}) + "\n")
+        return "applied", "note journaled", [], []
+    return "rejected", "unhandled verb", [], []
+
+
+def _drain_inbox(run_dir: Path) -> int:
+    """FR-60: drain <run-dir>/inbox/ at the START of a tick, under the caller's
+    .tick.lock. Idempotent by id (mark-FIRST against the processed-ids ledger so
+    a crash/replay never double-applies); --check each message; ack every one;
+    move processed files to inbox/processed/. Returns the count applied."""
+    inbox = run_dir / "inbox"
+    if not inbox.is_dir():
+        return 0
+    msgs = sorted(p for p in inbox.iterdir()
+                  if p.is_file() and p.suffix == ".json")
+    if not msgs:
+        return 0
+    plan = json.loads((run_dir / "plan.json").read_text(encoding="utf-8"))
+    status = json.loads((run_dir / "harness_status.json").read_text(encoding="utf-8"))
+    processed = _processed_ids(run_dir)
+    proc_dir = inbox / "processed"
+    pending = _load_pending(run_dir)
+    applied = 0
+    plan_mutated = False
+    for mp in msgs:
+        try:
+            msg = json.loads(mp.read_text(encoding="utf-8"))
+        except ValueError:
+            mid = mp.stem
+            if mid not in processed:
+                _mark_processed(run_dir, mid)
+                processed.add(mid)
+                _write_ack(run_dir, mid, "rejected", "malformed JSON")
+            proc_dir.mkdir(exist_ok=True)
+            mp.replace(proc_dir / mp.name)
+            continue
+        mid = msg.get("id") if isinstance(msg, dict) and msg.get("id") else mp.stem
+        if mid in processed:                       # idempotent replay -> no-op
+            proc_dir.mkdir(exist_ok=True)
+            mp.replace(proc_dir / mp.name)
+            continue
+        # COMMIT the id to the ledger FIRST: a crash after this never re-applies
+        # the message (idempotency over double-apply).
+        _mark_processed(run_dir, mid)
+        processed.add(mid)
+        probs = _check_message(msg)
+        if probs:
+            _write_ack(run_dir, mid, "rejected", "; ".join(probs))
+        else:
+            st, reason, task_ids, spawned = _process_message(run_dir, msg, plan, status)
+            _write_ack(run_dir, mid, st, reason, task_ids)
+            if st == "applied" and spawned:
+                pending[mid] = {"task_ids": task_ids, "runs": spawned}
+                plan_mutated = True
+                applied += 1
+            elif st == "applied":
+                applied += 1
+        proc_dir.mkdir(exist_ok=True)
+        mp.replace(proc_dir / mp.name)
+    if plan_mutated:
+        status["counts"] = _recount(status["runs"])
+        _write_json(run_dir / "plan.json", plan)
+        _write_json(run_dir / "harness_status.json", status)
+    _write_json(_outbox_dir(run_dir) / ".pending.json", pending)
+    _log(run_dir, "inbox: drained %d message(s)" % len(msgs))
+    return applied
+
+
+def _emit_ready_results(run_dir: Path, runs: dict) -> None:
+    """FR-60: when a message's staged work has all reached a terminal state,
+    write the append-only outbox result correlating message id <-> task_id(s)."""
+    pending = _load_pending(run_dir)
+    if not pending:
+        return
+    changed = False
+    for mid in list(pending):
+        spec = pending[mid]
+        rnames = spec.get("runs") or []
+        states = {n: (runs.get(n) or {}).get("state") for n in rnames}
+        if rnames and all(s in _TERMINAL_STATES for s in states.values()):
+            _write_json(_outbox_dir(run_dir) / (mid + ".result.json"), {
+                "message_id": mid, "task_ids": spec.get("task_ids", []),
+                "run_states": states, "completed": True, "ts": _utc_iso()})
+            del pending[mid]
+            changed = True
+    if changed:
+        _write_json(run_dir / "outbox" / ".pending.json", pending)
+
+
 def init_run(plan_path: Path) -> Path:
     plan = json.loads(plan_path.read_text(encoding="utf-8"))
     entries = plan.get("entries") or []
@@ -955,6 +1217,7 @@ def tick(run_dir: Path) -> dict:
     # waits untouched in incoming/ while STOP is present).
     if not (run_dir / "STOP").exists():
         _absorb_incoming(run_dir)
+        _drain_inbox(run_dir)            # FR-60: drain the message inbox under the lock
     status = json.loads((run_dir / "harness_status.json").read_text(encoding="utf-8"))
     plan = json.loads((run_dir / "plan.json").read_text(encoding="utf-8"))
     runs = status["runs"]
@@ -1038,6 +1301,9 @@ def tick(run_dir: Path) -> dict:
         # journaled so an independent reader can audit the continue/stop decision.
         cont = _continuation(run_dir, status, stop, now, next_minutes)
         status["continuation"] = cont
+        # FR-60: emit an outbox result for any inbox message whose staged work
+        # has now all reached a terminal state (id <-> task_id correlation).
+        _emit_ready_results(run_dir, runs)
         # strip transient field, then persist
         for r in runs.values():
             r.pop("_run_name", None)
