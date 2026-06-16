@@ -192,6 +192,103 @@ def render_monitor_frame(run_dir, interval=2.0, now=None):
     return header + "\n" + table, terminal, True
 
 
+# --- FR-60: chat <-> runner message channel CLI (send + receive) -----------
+def _new_msg_id() -> str:
+    """A sortable, unique message id (epoch-ms prefix + random suffix). ULID-ish;
+    stdlib only."""
+    return "%013d%s" % (int(time.time() * 1000), os.urandom(4).hex())
+
+
+def _now_iso() -> str:
+    import datetime as _dt
+    return _dt.datetime.now(_dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def cmd_msg(args) -> int:
+    """FR-60 send side: write a well-formed inbox message the running tick drains."""
+    run_dir = Path(args.run_dir).resolve()
+    if not (run_dir / "harness_status.json").is_file():
+        print("arunner msg: not a run-dir: %s" % run_dir, file=sys.stderr)
+        return 2
+    margs = {}
+    if args.args_json:
+        try:
+            margs = json.loads(args.args_json)
+        except json.JSONDecodeError as exc:
+            print("arunner msg: --args-json is not valid JSON (%s)" % exc,
+                  file=sys.stderr)
+            return 2
+        if not isinstance(margs, dict):
+            print("arunner msg: --args-json must be a JSON object", file=sys.stderr)
+            return 2
+    # convenience flags layer into args (never override an explicit --args-json key)
+    if args.prompt:
+        margs.setdefault("worker_prompt", args.prompt)
+    if args.op:
+        margs.setdefault("op", args.op)
+    if args.minutes is not None:
+        margs.setdefault("minutes", args.minutes)
+    if args.task:
+        margs.setdefault("task", args.task)
+    if args.text:
+        margs.setdefault("text", args.text)
+    if args.file:
+        doc = json.loads(Path(args.file).read_text(encoding="utf-8"))
+        margs.setdefault("entries", list(_resolve_plan(doc).get("entries") or []))
+    mid = _new_msg_id()
+    msg = {"id": mid, "verb": args.msg_verb, "args": margs, "ts": _now_iso()}
+    probs = TICK._check_message(msg)
+    if probs:
+        print("arunner msg: rejected before send (%d problem(s)):" % len(probs))
+        for p in probs:
+            print("  - %s" % p)
+        return 1
+    inbox = run_dir / "inbox"
+    inbox.mkdir(exist_ok=True)
+    (inbox / (mid + ".json")).write_text(json.dumps(msg, indent=2) + "\n",
+                                         encoding="utf-8")
+    print("arunner: queued message %s (verb %s); drained on the next tick. "
+          "Read the reply with: arunner outbox %s --id %s"
+          % (mid, args.msg_verb, run_dir, mid))
+    return 0
+
+
+def cmd_outbox(args) -> int:
+    """FR-60 receive side: read acks/results the engine wrote to the outbox."""
+    run_dir = Path(args.run_dir).resolve()
+    ob = run_dir / "outbox"
+    if not ob.is_dir():
+        print("arunner: no outbox yet at %s" % run_dir, file=sys.stderr)
+        return 2
+    if args.id:
+        found = False
+        for suff in ("ack", "result"):
+            p = ob / ("%s.%s.json" % (args.id, suff))
+            if p.is_file():
+                found = True
+                print("== %s ==" % p.name)
+                print(p.read_text(encoding="utf-8").rstrip())
+        if not found:
+            print("arunner: no outbox entry for id %s" % args.id, file=sys.stderr)
+            return 2
+        return 0
+    acks = sorted(ob.glob("*.ack.json"))
+    if not acks:
+        print("(no messages acked yet)")
+    for p in acks:
+        d = json.loads(p.read_text(encoding="utf-8"))
+        print("%-26s %-9s %s" % (d.get("message_id"), d.get("status"),
+                                 d.get("reason") or ""))
+    results = sorted(ob.glob("*.result.json"))
+    if results:
+        print("-- results --")
+        for p in results:
+            d = json.loads(p.read_text(encoding="utf-8"))
+            tag = d.get("verb") or d.get("run_states") or d.get("task_ids")
+            print("%-26s %s" % (d.get("message_id"), tag))
+    return 0
+
+
 def cmd_monitor(args) -> int:
     run_dir = Path(args.run_dir).resolve()
     interval = max(_MONITOR_MIN_INTERVAL, float(args.interval))
@@ -443,13 +540,34 @@ def _build_parser() -> argparse.ArgumentParser:
     mon.add_argument("--no-clear", action="store_true",
                      help="append frames with a separator instead of an ANSI "
                           "clear (dumb-terminal / piped fallback)")
+
+    mg = sub.add_parser("msg", help="send a typed message to a running run-dir's "
+                                    "inbox (FR-60); drained on the next tick")
+    mg.add_argument("run_dir")
+    mg.add_argument("msg_verb", metavar="verb", choices=list(TICK._MSG_VERBS))
+    mg.add_argument("--args-json", default=None,
+                    help="the message args as a JSON object")
+    mg.add_argument("--file", default=None,
+                    help="enqueue/run-batch: a plan/jobs file whose entries to stage")
+    mg.add_argument("--prompt", default=None, help="dispatch-job: the worker_prompt")
+    mg.add_argument("--op", default=None,
+                    choices=list(TICK._CONTROL_OPS),
+                    help="control: pause/resume/cadence/poll-now/cancel")
+    mg.add_argument("--minutes", type=int, default=None, help="control cadence: minutes")
+    mg.add_argument("--task", default=None, help="control cancel: the run/task to cancel")
+    mg.add_argument("--text", default=None, help="note: the text to journal")
+
+    ox = sub.add_parser("outbox", help="read acks/results from a run-dir's outbox "
+                                       "(FR-60)")
+    ox.add_argument("run_dir")
+    ox.add_argument("--id", default=None, help="show only this message id's ack+result")
     return p
 
 
 _DISPATCH = {"run": cmd_run, "status": cmd_status, "stop": cmd_stop,
              "resume": cmd_resume, "summary": cmd_summary, "new": cmd_new,
              "expand": cmd_expand, "preview": cmd_preview, "add": cmd_add,
-             "monitor": cmd_monitor}
+             "monitor": cmd_monitor, "msg": cmd_msg, "outbox": cmd_outbox}
 
 
 def main(argv=None) -> int:
