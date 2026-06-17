@@ -1,10 +1,19 @@
-"""FR-62 read-only DATA LAYER for the Textual TUI -- pure stdlib, no Textual.
+"""FR-62 DATA LAYER for the Textual TUI -- pure stdlib, no Textual.
 
-Every function here is a STRICTLY READ-ONLY consumer of a run-dir's externalized
-disk state -- the same load-bearing property FR-59's monitor holds: no run-state
-write, no ``.tick.lock``, no control file, no tick. It only *reads*
+Every *view* function here is a STRICTLY READ-ONLY consumer of a run-dir's
+externalized disk state -- the same load-bearing property FR-59's monitor holds:
+no run-state write, no ``.tick.lock``, no control file, no tick. It only *reads*
 ``harness_status.json``, ``plan.json``, per-entry ``run-NN/heartbeat.ndjson`` +
 ``manifest.json``, ``results/``, and ``journal.ndjson``.
+
+The ONLY exceptions (instr-051) are explicit, named, operator-confirmed actions:
+  * ``write_kill_control`` -- the one place the TUI writes a run-dir, and it
+    writes ONLY a CANCEL (FR-39) or STOP (FR-10) control file (the existing
+    control-file convention), after a confirm prompt in the view layer.
+  * ``copy_to_clipboard`` -- writes the system paste buffer (never the run-dir)
+    via a best-effort, stdlib-only platform tool.
+Both are isolated so the read-only boundary stays mechanically assertable: every
+other function leaves the run-dir byte-identical.
 
 It reuses, never forks:
   * the FR-59 monitor's frame renderer (``cli.render_monitor_frame`` ->
@@ -21,6 +30,9 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
+import subprocess
+import sys
 from pathlib import Path
 
 # Reuse the FR-59 monitor render path (shared `_format_table`, no fork) and the
@@ -61,15 +73,19 @@ def is_run_dir(path) -> bool:
     return (Path(path) / "harness_status.json").is_file()
 
 
-def list_runs(runs_root=None) -> list[dict]:
-    """The run picker's model: every run-dir under ``runs_root`` (default
-    ``default_runs_root()``), NEWEST-FIRST, each as a summary dict
-    ``{run_dir, name, cycle, counts, done, pool_size, mtime, ok}``.
+def list_runs(runs_root=None, now=None) -> list[dict]:
+    """The run picker / overview model: every run-dir under ``runs_root``
+    (default ``default_runs_root()``), NEWEST-FIRST, each as a summary dict
+    ``{run_dir, name, cycle, counts, done, pool_size, mtime, ok, health}``.
 
     Strictly read-only: it lists directories and reads each
-    ``harness_status.json`` -- it never creates ``runs_root`` and never writes.
-    A run-dir whose status is missing/garbage is reported with ``ok=False`` (so
-    the picker can show it rather than crash), never skipped silently."""
+    ``harness_status.json`` (+ ``plan.json`` for the health classification) --
+    it never creates ``runs_root`` and never writes. A run-dir whose status is
+    missing/garbage is reported with ``ok=False`` (so the picker can show it
+    rather than crash), never skipped silently.
+
+    ``health`` (instr-051) is the reconciled liveness flag for the overview:
+    RUNNING / STALE-TICK Nm / HUNG? / DONE / DEAD."""
     root = Path(runs_root) if runs_root is not None else default_runs_root()
     if not root.is_dir():
         return []
@@ -88,7 +104,7 @@ def list_runs(runs_root=None) -> list[dict]:
         if status is None:
             out.append({"run_dir": child, "name": child.name, "cycle": None,
                         "counts": {}, "done": None, "pool_size": None,
-                        "mtime": mtime, "ok": False})
+                        "mtime": mtime, "ok": False, "health": "UNREADABLE"})
             continue
         out.append({
             "run_dir": child,
@@ -99,9 +115,139 @@ def list_runs(runs_root=None) -> list[dict]:
             "pool_size": status.get("pool_size"),
             "mtime": mtime,
             "ok": True,
+            "health": run_health(child, status=status, now=now)["flag"],
         })
     out.sort(key=lambda r: r["mtime"], reverse=True)            # newest-first
     return out
+
+
+def run_health(run_dir, status=None, plan=None, now=None) -> dict:
+    """A strictly read-only health classification for one run-dir, reconciling
+    the persisted state with live heartbeats (the same horizon the status table
+    uses). Returns ``{flag, detail, tick_age_secs}``. Flags, in priority order:
+
+      * ``DONE``       -- ``status.done`` (all runs terminal).
+      * ``DEAD``       -- no tick for >> the stall threshold (2x): the
+                          orchestrator is gone, not merely blocked.
+      * ``HUNG?``      -- an entry is ``claimed`` past launch grace with no fresh
+                          heartbeat and no terminal sentinel (dispatched but it
+                          never started -- the FR-21b launch-fail shape).
+      * ``STALE-TICK Nm`` -- tick age > 2x the cadence: the orchestrator is
+                          blocked between ticks (heartbeats may still be live).
+      * ``RUNNING``    -- otherwise (live; entries in flight or idle).
+
+    Read-only: reads ``harness_status.json`` / ``plan.json`` / per-entry
+    heartbeats only."""
+    run_dir = Path(run_dir)
+    sp = run_dir / "harness_status.json"
+    if status is None:
+        status = _read_json(sp)
+    if status is None:
+        return {"flag": "DEAD", "detail": "unreadable harness_status.json",
+                "tick_age_secs": None}
+    if plan is None:
+        plan = _read_json(run_dir / "plan.json") or {}
+    now = TICK._now() if now is None else now
+    tick_age = CLI._status_age_secs(status, sp, now)
+    if status.get("done"):
+        return {"flag": "DONE", "detail": "all runs terminal",
+                "tick_age_secs": tick_age}
+    stall_secs = TICK._cfg(plan, "stall_threshold_minutes",
+                           TICK.DEFAULT_STALL_THRESHOLD_MINUTES) * 60
+    grace_secs = TICK._cfg(plan, "launch_grace_minutes",
+                           TICK.DEFAULT_LAUNCH_GRACE_MINUTES) * 60
+    # DEAD: no tick for well past the stall threshold -> the engine is gone.
+    if tick_age is not None and tick_age > 2 * stall_secs:
+        return {"flag": "DEAD", "detail": "no tick for %s" % CLI._age_str(tick_age),
+                "tick_age_secs": tick_age}
+    # HUNG?: a claimed entry past launch grace, no fresh heartbeat, no terminal.
+    for name, rec in (status.get("runs") or {}).items():
+        if (rec or {}).get("state") != "claimed":
+            continue
+        has_any, hb_status, _activity, hb_mtime = TICK._hb_observe(
+            TICK._heartbeat_path(run_dir, name))
+        if hb_status in TICK._TERMINAL_HB:
+            continue                                  # finished, not hung
+        fresh = (hb_mtime is not None and (now - hb_mtime) <= grace_secs)
+        if not fresh:
+            return {"flag": "HUNG?",
+                    "detail": "%s claimed, no heartbeat past launch grace" % name,
+                    "tick_age_secs": tick_age}
+    # STALE-TICK: tick age > 2x the cadence -> blocked between ticks.
+    cadence_min = status.get("next_tick_minutes")
+    if (isinstance(cadence_min, (int, float)) and cadence_min > 0
+            and tick_age is not None and tick_age > 2 * cadence_min * 60):
+        return {"flag": "STALE-TICK %s" % CLI._age_str(tick_age),
+                "detail": "tick age > 2x cadence", "tick_age_secs": tick_age}
+    return {"flag": "RUNNING", "detail": "", "tick_age_secs": tick_age}
+
+
+# --- the ONE write path + the clipboard helper (instr-051) ------------------
+
+def write_kill_control(run_dir, run_name=None, verb="CANCEL") -> Path:
+    """The TUI's ONLY run-dir write: drop a control file that terminates a run.
+    It writes EXACTLY one control file and nothing else -- the view layer gates
+    it behind an explicit confirm prompt.
+
+      * ``CANCEL`` (FR-39): abandon ONE entry, freeing its pool slot on the next
+        tick. The run id travels in the file BODY (the FR-37/39 value channel),
+        so ``run_name`` is required.
+      * ``STOP`` (FR-10): halt the WHOLE run cleanly on its next tick.
+
+    Returns the control-file path written. Raises ValueError on a bad verb or a
+    CANCEL with no run id."""
+    run_dir = Path(run_dir)
+    verb = (verb or "").upper()
+    if verb == "STOP":
+        p = run_dir / "STOP"
+        p.write_text("", encoding="utf-8")
+        return p
+    if verb == "CANCEL":
+        if not run_name:
+            raise ValueError("CANCEL needs a run id (e.g. run-02)")
+        p = run_dir / "CANCEL"
+        p.write_text(str(run_name), encoding="utf-8")     # value channel = run id
+        return p
+    raise ValueError("unknown kill verb %r (want CANCEL or STOP)" % (verb,))
+
+
+def _clipboard_candidates() -> list[list[str]]:
+    """The platform clipboard tools to try, in order (stdlib subprocess only;
+    no clipboard dependency is added to the engine)."""
+    if sys.platform == "darwin":
+        return [["pbcopy"]]
+    if os.name == "nt":
+        return [["clip"]]
+    return [["wl-copy"], ["xclip", "-selection", "clipboard"],
+            ["xsel", "--clipboard", "--input"]]
+
+
+def copy_to_clipboard(text, _run=None) -> tuple[bool, str]:
+    """Best-effort, cross-platform, stdlib-only copy of ``text`` to the system
+    paste buffer. Returns ``(ok, info)`` -- ``info`` names the tool used on
+    success, or a graceful message when no tool is available (NEVER raises, so a
+    headless/CI host without a clipboard just gets a status message). Writes the
+    paste buffer only -- never the run-dir. ``_run`` is an injection seam for
+    tests."""
+    run = _run or subprocess.run
+    candidates = _clipboard_candidates()
+    tried = []
+    for cmd in candidates:
+        exe = shutil.which(cmd[0])
+        if not exe:
+            tried.append(cmd[0])
+            continue
+        try:
+            proc = run([exe] + cmd[1:], input=(text or "").encode("utf-8"),
+                       capture_output=True)
+        except OSError:
+            tried.append(cmd[0])
+            continue
+        if getattr(proc, "returncode", 1) == 0:
+            return True, cmd[0]
+        tried.append(cmd[0])
+    return False, ("no clipboard tool available (tried: %s)"
+                   % ", ".join(c[0] for c in candidates))
 
 
 def run_view_frame(run_dir, interval: float = 2.0, now=None):
@@ -139,16 +285,27 @@ def entry_detail(run_dir, run_name: str) -> dict | None:
     rec = (status.get("runs") or {}).get(run_name)
     if rec is None:
         return None
+    plan = _read_json(run_dir / "plan.json") or {}
     manifest = _read_json(run_dir / run_name / "manifest.json") or {}
     hb_path = TICK._heartbeat_path(run_dir, run_name)
     has_any, hb_status, activity, hb_mtime = TICK._hb_observe(hb_path)
     result = TICK._read_result_record(run_dir, rec.get("job_id"))
+    # instr-051: reconcile the persisted state with the live heartbeat (the SAME
+    # logic the status table uses), so the entry view also shows the freshest
+    # truth, not the stale last-tick state.
+    now = TICK._now()
+    fresh_secs = TICK._cfg(plan, "stall_threshold_minutes",
+                           TICK.DEFAULT_STALL_THRESHOLD_MINUTES) * 60
+    display_state, live = TICK._reconcile_state(
+        rec.get("state"), hb_status, hb_mtime, now, fresh_secs)
     return {
         "run": run_name,
         "task_id": rec.get("task_id"),
         "job_id": rec.get("job_id"),
         "target_repo": rec.get("target_repo"),
         "state": rec.get("state"),
+        "display_state": display_state,
+        "live": live,
         "dispatch_mode": manifest.get("dispatch_mode"),
         "claimed_at": rec.get("claimed_at"),
         "last_hb_status": rec.get("last_hb_status"),
@@ -208,14 +365,16 @@ def _tail_parsed(path, limit: int) -> list[dict]:
 # --- pure text view-models (Textual-free, so they're testable headless) ------
 
 def format_picker_row(run: dict) -> str:
-    """One run-picker line: name, cycle, queued/running/completed/failed counts,
-    done flag -- a pure function of a ``list_runs`` summary dict."""
+    """One overview/picker line: name, cycle, queued/running/completed/failed
+    counts, and the reconciled HEALTH flag (instr-051) -- a pure function of a
+    ``list_runs`` summary dict. The health flag (RUNNING / STALE-TICK Nm /
+    HUNG? / DONE / DEAD) is the "what's happening across all my runs" signal."""
     if not run.get("ok"):
         return "%-22s  (unreadable harness_status.json)" % run["name"]
     c = run.get("counts") or {}
     failed = (c.get("failed", 0) + c.get("auth_or_launch_failed", 0)
               + c.get("abandoned", 0))
-    flag = "DONE" if run.get("done") else "live"
+    flag = run.get("health") or ("DONE" if run.get("done") else "live")
     return ("%-22s  cyc %-4s  Q%-3d R%-3d C%-3d F%-3d  %s" % (
         run["name"], run.get("cycle"), c.get("queued", 0), c.get("running", 0),
         c.get("completed", 0), failed, flag))
@@ -228,11 +387,18 @@ def format_entry_detail(detail: dict) -> str:
     and in the live TUI."""
     if detail is None:
         return "(no such entry)"
+    # instr-051: show the reconciled DISPLAY state first (the freshest truth),
+    # and annotate when it leads the last-tick persisted state.
+    disp = detail.get("display_state", detail.get("state"))
+    state_line = "state         : %s" % disp
+    if detail.get("live"):
+        state_line += "  (* live from heartbeat, ahead of last tick; " \
+                      "persisted: %s)" % detail.get("state")
     lines = [
         "Entry %s  (task %s, job %s)" % (
             detail["run"], detail.get("task_id"), detail.get("job_id")),
         "-" * 60,
-        "state         : %s" % detail.get("state"),
+        state_line,
         "target_repo   : %s" % detail.get("target_repo"),
         "dispatch_mode : %s" % detail.get("dispatch_mode"),
         "claimed_at    : %s" % detail.get("claimed_at"),

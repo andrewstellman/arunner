@@ -164,10 +164,23 @@ def _status_age_secs(status, status_path, now) -> float:
 def _monitor_freshness_line(run_dir, status, status_path, interval, now) -> str:
     """The monitor-OWNED honesty line printed AROUND the shared table (never
     edits `_format_table`'s body): the fast display refresh must not imply the
-    lifecycle columns are fresher than the last engine tick (NFR-12)."""
-    age = _age_str(_status_age_secs(status, status_path, now))
-    return ("monitor: refresh %.1fs | run-state as of last tick: %s ago | "
-            "ACTIVITY/HB-AGE: live (Ctrl-C to exit)" % (interval, age))
+    lifecycle columns are fresher than the last engine tick (NFR-12).
+
+    instr-051: when the last tick is much older than the cadence (> 2x the
+    persisted ``next_tick_minutes``), the orchestrator is likely blocked between
+    ticks -- make that visually obvious so the operator can always tell a stale
+    LIFECYCLE (tick-age) from live HEARTBEAT activity."""
+    age_secs = _status_age_secs(status, status_path, now)
+    age = _age_str(age_secs)
+    stale = ""
+    cadence_min = status.get("next_tick_minutes")
+    if (isinstance(cadence_min, (int, float)) and cadence_min > 0
+            and not status.get("done") and age_secs > 2 * float(cadence_min) * 60):
+        stale = (" !! STALE TICK (>2x cadence; orchestrator may be blocked "
+                 "between ticks) !!")
+    return ("monitor: refresh %.1fs | run-state as of last tick: %s ago%s | "
+            "ACTIVITY/HB-AGE: live | * = live heartbeat ahead of last tick "
+            "(Ctrl-C to exit)" % (interval, age, stale))
 
 
 def render_monitor_frame(run_dir, interval=2.0, now=None):

@@ -7,15 +7,19 @@ engine/ticker/monitor path stays dependency-free (NFR-3).
 
 Everything the views render comes from the strictly read-only
 ``arunner.tui.data`` layer (which reuses the FR-59 monitor render path). The app
-holds NO write path of its own: it advances nothing, locks nothing, drops no
-control file -- it is a viewer over externalized disk state (NFR-9), the same
-property the FR-59 monitor holds.
+holds exactly ONE write path -- the explicit, confirm-prompted KILL action
+(``DATA.write_kill_control``) that drops a CANCEL/STOP control file; every other
+view advances nothing, locks nothing, drops no control file -- it is a viewer
+over externalized disk state (NFR-9), the same property the FR-59 monitor holds.
 
-Four views (all read-only):
-  1. Run picker     -- run-dirs newest-first; pick one to open.
-  2. Run view       -- the live status table (FR-59 renderer), refreshing.
-  3. Entry view     -- one entry's full record + heartbeat history + results.
+Views (read-only except the gated kill):
+  1. Overview       -- ALL run-dirs newest-first, each with live counts + a
+                       reconciled HEALTH flag (instr-051); ``k`` stops a run.
+  2. Run view       -- the live status table (FR-59 renderer, reconciled);
+                       ``k`` cancels the selected entry.
+  3. Entry view     -- one entry's full record (reconciled) + heartbeat history.
   4. Log/HB tail    -- follow that entry's heartbeat.ndjson (and the journal).
+Every view supports ``c`` to copy its displayed content to the clipboard.
 """
 from __future__ import annotations
 
@@ -27,7 +31,7 @@ from pathlib import Path
 from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import Vertical, VerticalScroll
-from textual.screen import Screen
+from textual.screen import ModalScreen, Screen
 from textual.widgets import Footer, Header, Label, ListItem, ListView, Static
 
 from arunner.tui import data as DATA
@@ -38,35 +42,118 @@ from arunner.tui import data as DATA
 REFRESH_SECONDS = 2.0
 
 
-class RunPickerScreen(Screen):
-    """View 1: list run-dirs under the runs-root, newest-first; pick one."""
+class ConfirmScreen(ModalScreen):
+    """A tiny yes/no modal. The TUI's ONE write (the kill action) is gated
+    behind this: ``on_confirm`` (a zero-arg callable returning a status string)
+    runs only on an explicit ``y``; ``n``/``escape`` cancels without writing."""
 
-    BINDINGS = [Binding("r", "refresh", "Refresh"), Binding("q", "quit", "Quit")]
+    BINDINGS = [Binding("y", "yes", "Yes"), Binding("n", "no", "No"),
+                Binding("escape", "no", "Cancel")]
+
+    def __init__(self, prompt: str, on_confirm) -> None:
+        super().__init__()
+        self._prompt = prompt
+        self._on_confirm = on_confirm
+
+    def compose(self) -> ComposeResult:
+        yield Static(self._prompt + "\n\n[y] confirm    [n] cancel",
+                     id="confirm-body")
+
+    def action_yes(self) -> None:
+        msg = None
+        try:
+            msg = self._on_confirm()
+        except Exception as exc:                       # never crash the TUI
+            msg = "action failed: %s" % exc
+        self.app.pop_screen()
+        if msg:
+            _notify(self.app, msg)
+
+    def action_no(self) -> None:
+        self.app.pop_screen()
+
+
+def _notify(app, message: str) -> None:
+    """Best-effort status toast; degrade silently if the Textual build lacks
+    ``notify`` (older/newer API)."""
+    try:
+        app.notify(message)
+    except Exception:
+        pass
+
+
+class _CopyMixin:
+    """A ``c`` keybind that copies the focused view's displayed text to the
+    system clipboard (the one read-side convenience write -- the paste buffer,
+    never the run-dir). Subclasses define ``_copy_text()``."""
+
+    def action_copy(self) -> None:
+        ok, info = DATA.copy_to_clipboard(self._copy_text())
+        _notify(self.app, ("copied to clipboard via %s" % info) if ok
+                else ("copy unavailable: %s" % info))
+
+    def _copy_text(self) -> str:
+        return ""
+
+
+class RunPickerScreen(_CopyMixin, Screen):
+    """View 1 (the in-flight OVERVIEW, instr-051): every run-dir under the
+    runs-root, newest-first, each with its live counts + reconciled HEALTH flag
+    (RUNNING / STALE-TICK / HUNG? / DONE / DEAD). Enter opens one; ``k`` stops a
+    selected run (confirm-prompted STOP); ``c`` copies the overview."""
+
+    BINDINGS = [Binding("r", "refresh", "Refresh"),
+                Binding("k", "kill", "Stop run"),
+                Binding("c", "copy", "Copy"),
+                Binding("q", "quit", "Quit")]
 
     def compose(self) -> ComposeResult:
         yield Header()
-        yield Label("Pick a run (Enter to open):  %s" % self.app.runs_root,
-                    id="picker-title")
+        yield Label("In-flight overview (Enter=open, k=stop, c=copy):  %s"
+                    % self.app.runs_root, id="picker-title")
         yield ListView(id="run-list")
         yield Footer()
 
     def on_mount(self) -> None:
         self._reload()
+        self.set_interval(REFRESH_SECONDS, self._reload)        # live overview
 
     def action_refresh(self) -> None:
         self._reload()
 
     def _reload(self) -> None:
         lv = self.query_one("#run-list", ListView)
+        idx = lv.index                                          # keep selection
         lv.clear()
-        runs = DATA.list_runs(self.app.runs_root)
-        if not runs:
+        self._rows = DATA.list_runs(self.app.runs_root)
+        if not self._rows:
             lv.append(ListItem(Label("(no runs under %s)" % self.app.runs_root)))
             return
-        for run in runs:
+        for run in self._rows:
             item = ListItem(Label(DATA.format_picker_row(run)))
             item.run_dir = run["run_dir"]                       # carry the path
             lv.append(item)
+        if idx is not None and 0 <= idx < len(self._rows):
+            lv.index = idx
+
+    def _copy_text(self) -> str:
+        return "\n".join(DATA.format_picker_row(r)
+                         for r in DATA.list_runs(self.app.runs_root))
+
+    def action_kill(self) -> None:
+        lv = self.query_one("#run-list", ListView)
+        item = lv.highlighted_child
+        run_dir = getattr(item, "run_dir", None) if item else None
+        if run_dir is None:
+            return
+
+        def _do():
+            p = DATA.write_kill_control(run_dir, verb="STOP")
+            return "wrote STOP to %s (halts on its next tick)" % run_dir.name
+
+        self.app.push_screen(ConfirmScreen(
+            "STOP run %s? It halts cleanly on its next tick (FR-10)."
+            % Path(run_dir).name, _do))
 
     def on_list_view_selected(self, event: ListView.Selected) -> None:
         run_dir = getattr(event.item, "run_dir", None)
@@ -74,14 +161,17 @@ class RunPickerScreen(Screen):
             self.app.push_screen(RunViewScreen(run_dir))
 
 
-class RunViewScreen(Screen):
-    """View 2: the live status table (FR-59 renderer) + an entry list to drill
-    into. Refreshes on an interval; exits the loop when the run is terminal only
-    in the sense that the header stops advancing (we keep rendering, read-only)."""
+class RunViewScreen(_CopyMixin, Screen):
+    """View 2: the live status table (FR-59 renderer, reconciled per instr-051) +
+    an entry list to drill into. ``k`` CANCELs the selected entry
+    (confirm-prompted, frees its slot); ``c`` copies the table. Refreshes on an
+    interval; read-only except the explicit kill."""
 
     BINDINGS = [
         Binding("escape", "app.pop_screen", "Back"),
         Binding("r", "refresh", "Refresh"),
+        Binding("k", "kill", "Cancel entry"),
+        Binding("c", "copy", "Copy"),
         Binding("q", "quit", "Quit"),
     ]
 
@@ -93,7 +183,7 @@ class RunViewScreen(Screen):
     def compose(self) -> ComposeResult:
         yield Header()
         yield Static(self._last_good, id="run-table")
-        yield Label("Entries (Enter to drill in):", id="entries-title")
+        yield Label("Entries (Enter=drill in, k=cancel):", id="entries-title")
         yield ListView(id="entry-list")
         yield Footer()
 
@@ -122,19 +212,40 @@ class RunViewScreen(Screen):
             item.entry_name = name
             lv.append(item)
 
+    def _copy_text(self) -> str:
+        return self._last_good
+
+    def action_kill(self) -> None:
+        lv = self.query_one("#entry-list", ListView)
+        item = lv.highlighted_child
+        name = getattr(item, "entry_name", None) if item else None
+        if name is None:
+            return
+
+        def _do():
+            DATA.write_kill_control(self.run_dir, run_name=name, verb="CANCEL")
+            return "wrote CANCEL for %s (frees its slot next tick)" % name
+
+        self.app.push_screen(ConfirmScreen(
+            "CANCEL (abandon) entry %s in %s? It is marked abandoned and its "
+            "pool slot frees on the next tick (FR-39)." % (name, self.run_dir.name),
+            _do))
+
     def on_list_view_selected(self, event: ListView.Selected) -> None:
         name = getattr(event.item, "entry_name", None)
         if name is not None:
             self.app.push_screen(EntryViewScreen(self.run_dir, name))
 
 
-class EntryViewScreen(Screen):
-    """View 3: one entry's full record + its heartbeat history + results."""
+class EntryViewScreen(_CopyMixin, Screen):
+    """View 3: one entry's full record (reconciled state, instr-051) + its
+    heartbeat history + results. ``c`` copies the rendered detail."""
 
     BINDINGS = [
         Binding("escape", "app.pop_screen", "Back"),
         Binding("t", "tail", "Tail log"),
         Binding("r", "refresh", "Refresh"),
+        Binding("c", "copy", "Copy"),
         Binding("q", "quit", "Quit"),
     ]
 
@@ -142,6 +253,7 @@ class EntryViewScreen(Screen):
         super().__init__()
         self.run_dir = Path(run_dir)
         self.entry_name = entry_name
+        self._rendered = ""
 
     def compose(self) -> ComposeResult:
         yield Header()
@@ -161,20 +273,26 @@ class EntryViewScreen(Screen):
     def action_tail(self) -> None:
         self.app.push_screen(TailScreen(self.run_dir, self.entry_name))
 
+    def _copy_text(self) -> str:
+        return self._rendered
+
     def _refresh(self) -> None:
         detail = DATA.entry_detail(self.run_dir, self.entry_name)
         history = DATA.heartbeat_history(self.run_dir, self.entry_name)
-        self.query_one("#entry-detail", Static).update(
-            DATA.format_entry_detail(detail))
-        self.query_one("#entry-history", Static).update(
-            "heartbeat history:\n" + DATA.format_history(history))
+        detail_text = DATA.format_entry_detail(detail)
+        history_text = "heartbeat history:\n" + DATA.format_history(history)
+        self._rendered = detail_text + "\n\n" + history_text
+        self.query_one("#entry-detail", Static).update(detail_text)
+        self.query_one("#entry-history", Static).update(history_text)
 
 
-class TailScreen(Screen):
-    """View 4: follow this entry's heartbeat.ndjson and the run journal live."""
+class TailScreen(_CopyMixin, Screen):
+    """View 4: follow this entry's heartbeat.ndjson and the run journal live.
+    ``c`` copies the current tails."""
 
     BINDINGS = [
         Binding("escape", "app.pop_screen", "Back"),
+        Binding("c", "copy", "Copy"),
         Binding("q", "quit", "Quit"),
     ]
 
@@ -182,6 +300,7 @@ class TailScreen(Screen):
         super().__init__()
         self.run_dir = Path(run_dir)
         self.entry_name = entry_name
+        self._rendered = ""
 
     def compose(self) -> ComposeResult:
         yield Header()
@@ -197,18 +316,24 @@ class TailScreen(Screen):
         self._refresh()
         self.set_interval(REFRESH_SECONDS, self._refresh)
 
+    def _copy_text(self) -> str:
+        return self._rendered
+
     def _refresh(self) -> None:
         hb = DATA.heartbeat_history(self.run_dir, self.entry_name, limit=40)
         jr = DATA.journal_tail(self.run_dir, limit=40)
-        self.query_one("#hb-tail", Static).update(DATA.format_history(hb, 40))
-        self.query_one("#journal-tail", Static).update(
-            DATA.format_history(jr, 40))
+        hb_text = DATA.format_history(hb, 40)
+        jr_text = DATA.format_history(jr, 40)
+        self._rendered = ("heartbeat.ndjson:\n" + hb_text
+                          + "\n\njournal.ndjson:\n" + jr_text)
+        self.query_one("#hb-tail", Static).update(hb_text)
+        self.query_one("#journal-tail", Static).update(jr_text)
 
 
 class ArunnerTUI(App):
-    """The `arunner tui` app. Strictly read-only: it constructs no write path.
-    Opens the run picker, or jumps straight to the run view when launched with a
-    run-dir argument."""
+    """The `arunner tui` app. Read-only except the explicit, confirm-prompted
+    kill action. Opens the in-flight OVERVIEW, or jumps straight to the run view
+    when launched with a run-dir argument."""
 
     TITLE = "arunner tui"
     CSS = "#run-table { height: auto; } #picker-title, #entries-title { padding: 0 1; }"
