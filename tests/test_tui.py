@@ -46,12 +46,14 @@ def _heartbeat(run_dir, run, status="IN_PROGRESS", label="step 1"):
                              "status": status, "label": label}) + "\n")
 
 
-def _run_dir(done=False, with_result=False):
+def _run_dir(done=False, with_result=False, root=None):
     """A minimal STATIC run-dir (no live workers) so the never-writes pin is not
     confounded by detached workers still writing. run-01 is running with a
     heartbeat + manifest; run-02 is queued. Optionally a terminal results/
-    record for run-01 + a journal line."""
-    rd = Path(tempfile.mkdtemp())
+    record for run-01 + a journal line. ``root`` places the run-dir under a
+    dedicated parent (so a runs-root snapshot isn't polluted by the shared
+    system temp dir)."""
+    rd = Path(tempfile.mkdtemp(dir=str(root) if root is not None else None))
     runs = {"run-01": {"task_id": "a", "job_id": "job-00001", "target_repo": "/r/a",
                        "state": "completed" if done else "running",
                        "last_hb_status": "COMPLETED" if done else "IN_PROGRESS",
@@ -107,9 +109,11 @@ def _tui_args(run_dir=None, runs_root=None):
 class NeverWrites(unittest.TestCase):                           # PIN
 
     def test_never_writes(self):
-        rd = _run_dir(with_result=True)
-        # a sibling run-dir under a shared root, so list_runs is exercised too
-        root = rd.parent
+        # build the fixture under a DEDICATED root (not the shared system temp
+        # dir), so the runs-root snapshot can't be polluted by other processes'
+        # temp files -- a load-bearing safety pin must bite reliably.
+        root = Path(tempfile.mkdtemp())
+        rd = _run_dir(with_result=True, root=root)
         before_rd = _snapshot(rd)
         before_root = sorted(str(p) for p in root.rglob("*"))
 

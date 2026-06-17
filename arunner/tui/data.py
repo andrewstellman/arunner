@@ -160,16 +160,28 @@ def run_health(run_dir, status=None, plan=None, now=None) -> dict:
     if tick_age is not None and tick_age > 2 * stall_secs:
         return {"flag": "DEAD", "detail": "no tick for %s" % CLI._age_str(tick_age),
                 "tick_age_secs": tick_age}
-    # HUNG?: a claimed entry past launch grace, no fresh heartbeat, no terminal.
+    # HUNG?: a claimed entry that is PAST launch grace (the engine's own
+    # launch-fail horizon, _advance: now - claimed_at > grace_secs) with no
+    # fresh heartbeat and no terminal sentinel. Gating on claimed_at -- not just
+    # heartbeat absence -- avoids false-flagging every freshly-claimed entry
+    # during its normal launch window.
     for name, rec in (status.get("runs") or {}).items():
-        if (rec or {}).get("state") != "claimed":
+        rec = rec or {}
+        if rec.get("state") != "claimed":
             continue
-        has_any, hb_status, _activity, hb_mtime = TICK._hb_observe(
-            TICK._heartbeat_path(run_dir, name))
-        if hb_status in TICK._TERMINAL_HB:
+        hb = TICK._heartbeat_path(run_dir, name)
+        # whole-tail terminal scan (matches the engine), so a finished worker is
+        # never mistaken for hung even if a non-terminal line trails its sentinel
+        if TICK._terminal_status_of(hb) in TICK._TERMINAL_HB:
             continue                                  # finished, not hung
+        _has, _st, _activity, hb_mtime = TICK._hb_observe(hb)
         fresh = (hb_mtime is not None and (now - hb_mtime) <= grace_secs)
-        if not fresh:
+        if fresh:
+            continue                                  # alive and beating
+        claimed_at = rec.get("claimed_at")
+        past_grace = (isinstance(claimed_at, (int, float))
+                      and (now - claimed_at) > grace_secs)
+        if past_grace:
             return {"flag": "HUNG?",
                     "detail": "%s claimed, no heartbeat past launch grace" % name,
                     "tick_age_secs": tick_age}
@@ -292,12 +304,14 @@ def entry_detail(run_dir, run_name: str) -> dict | None:
     result = TICK._read_result_record(run_dir, rec.get("job_id"))
     # instr-051: reconcile the persisted state with the live heartbeat (the SAME
     # logic the status table uses), so the entry view also shows the freshest
-    # truth, not the stale last-tick state.
+    # truth, not the stale last-tick state. Use the whole-tail terminal scan
+    # (matches the engine) for the terminal-ahead-of-tick case.
     now = TICK._now()
     fresh_secs = TICK._cfg(plan, "stall_threshold_minutes",
                            TICK.DEFAULT_STALL_THRESHOLD_MINUTES) * 60
+    eff_status = TICK._terminal_status_of(hb_path) or hb_status
     display_state, live = TICK._reconcile_state(
-        rec.get("state"), hb_status, hb_mtime, now, fresh_secs)
+        rec.get("state"), eff_status, hb_mtime, now, fresh_secs)
     return {
         "run": run_name,
         "task_id": rec.get("task_id"),

@@ -1677,11 +1677,16 @@ def _format_table(run_dir, status, plan, terminal: bool) -> str:
                       DEFAULT_STALL_THRESHOLD_MINUTES) * 60
     for name in sorted(status["runs"]):
         r = status["runs"][name]
-        _, hb_status, activity, hb_mtime = _hb_observe(_heartbeat_path(run_dir, name))
+        hb = _heartbeat_path(run_dir, name)
+        _, hb_status, activity, hb_mtime = _hb_observe(hb)
+        # Match the engine's terminal detection (_terminal_status_of scans the
+        # WHOLE tail), so a terminal sentinel followed by a trailing line still
+        # reconciles to the terminal truth -- not only when it is the last line.
+        eff_status = _terminal_status_of(hb) or hb_status
         st = r["state"]
         if st == "auth_or_launch_failed":
             any_launch_fail = True
-        disp, live = _reconcile_state(st, hb_status, hb_mtime, now, fresh_secs)
+        disp, live = _reconcile_state(st, eff_status, hb_mtime, now, fresh_secs)
         any_live = any_live or live
         disp_label = _STATE_DISPLAY.get(disp, disp)
         if live:

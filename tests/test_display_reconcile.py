@@ -139,6 +139,42 @@ class TableReconciliation(unittest.TestCase):                  # PINs
         self.assertNotIn("* = live", table)
 
 
+class FreshnessGuard(unittest.TestCase):
+    """The reconciliation must not MISLEAD in a new way: a stale IN_PROGRESS
+    from a quiet/dead worker stays `claimed` (never false `running*`); a terminal
+    sentinel is detected anywhere in the tail (matching the engine)."""
+
+    def tearDown(self):
+        os.environ.pop("ARUNNER_NOW", None)
+
+    def test_stale_inprogress_stays_claimed(self):
+        import time
+        rd = _mk_run([{"name": "run-01", "state": "claimed",
+                       "hb_status": "IN_PROGRESS"}])
+        # the heartbeat is now ANCIENT relative to the (overridden) clock
+        os.environ["ARUNNER_NOW"] = str(time.time() + 100000)
+        status = json.loads((rd / "harness_status.json").read_text())
+        plan = json.loads((rd / "plan.json").read_text())
+        table = TICK._format_table(rd, status, plan, terminal=False)
+        self.assertEqual(_state_cell(table, "01"), "claimed")   # NOT running*
+        self.assertNotIn("running*", table)
+
+    def test_terminal_sentinel_trailing_line(self):
+        # COMPLETED followed by a trailing non-terminal line: the whole-tail scan
+        # (TICK._terminal_status_of) still reconciles to completed*, so a late
+        # keepalive after the sentinel can't hide a completion.
+        rd = _mk_run([{"name": "run-01", "state": "claimed",
+                       "hb_status": "COMPLETED"}])
+        hb = rd / "run-01" / "heartbeat.ndjson"
+        with hb.open("a", encoding="utf-8") as fh:
+            fh.write(json.dumps({"ts": "t2", "status": "IN_PROGRESS",
+                                 "label": "late line"}) + "\n")
+        status = json.loads((rd / "harness_status.json").read_text())
+        plan = json.loads((rd / "plan.json").read_text())
+        table = TICK._format_table(rd, status, plan, terminal=False)
+        self.assertEqual(_state_cell(table, "01"), "completed*")
+
+
 class StaleTickHeader(unittest.TestCase):
 
     def tearDown(self):
@@ -214,6 +250,20 @@ class OverviewHealth(unittest.TestCase):
         rd = _mk_run([{"name": "run-01", "state": "claimed",
                        "hb_status": "IN_PROGRESS"}], last_tick_wall=TICK._now())
         self.assertEqual(DATA.run_health(rd)["flag"], "RUNNING")
+
+    def test_recent_claim_not_hung(self):
+        # claimed, NO heartbeat yet, but claimed only 30s ago (well within the
+        # launch grace) -> NOT hung: it's in the normal launch window. HUNG must
+        # gate on claimed_at past grace, not on heartbeat absence alone.
+        rd = _mk_run([{"name": "run-01", "state": "claimed", "hb": False,
+                       "claimed_at": self.NOW - 30}], last_tick_wall=self.NOW - 10)
+        self.assertEqual(self._health(rd), "RUNNING")
+
+    def test_claimed_past_grace_no_heartbeat_is_hung(self):
+        # claimed past launch grace (claimed_at old), no heartbeat -> HUNG.
+        rd = _mk_run([{"name": "run-01", "state": "claimed", "hb": False,
+                       "claimed_at": self.NOW - 3600}], last_tick_wall=self.NOW - 60)
+        self.assertEqual(self._health(rd), "HUNG?")
 
     def test_stale_tick(self):
         # no claimed-hung entry; tick age 30m > 2x cadence(5m); < 2x stall.
