@@ -20,6 +20,14 @@ classifiers = [
   "Intended Audience :: Developers",
 ]
 
+[project.optional-dependencies]
+# FR-62: the interactive `arunner tui` is an OPTIONAL, decoupled viewer. The
+# bare `arunner` install stays zero-dependency (NFR-3 -- engine is stdlib);
+# Textual is pulled in only by `pip install arunner[tui]`, and imported lazily
+# so the engine/ticker/monitor path never touches it. `arunner monitor` remains
+# the always-available stdlib fallback.
+tui = ["textual>=0.50"]
+
 [project.urls]
 Homepage = "https://github.com/andrewstellman/arunner"
 Repository = "https://github.com/andrewstellman/arunner"
@@ -30,4 +38,7 @@ arunner-ticker = "arunner.engine.ticker:main"
 arunner-heartbeat = "arunner.engine.heartbeat:main"
 
 [tool.setuptools]
-packages = ["arunner", "arunner.engine"]
+# arunner.tui ships in the wheel (so `arunner[tui]` works once installed), but
+# its only Textual import lives in arunner/tui/app.py, imported lazily by
+# `cli.cmd_tui` -- the engine path (arunner.engine, monitor) imports none of it.
+packages = ["arunner", "arunner.engine", "arunner.tui"]

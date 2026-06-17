@@ -330,6 +330,31 @@ def cmd_monitor(args) -> int:
         return 0
 
 
+# --- FR-62: optional Textual TUI (`arunner tui`) ---------------------------
+# A richer, interactive sibling of `arunner monitor`: pick a run, watch it live,
+# drill into one entry, tail its heartbeat/journal stream -- all strictly
+# read-only over the externalized disk state. Textual is an OPTIONAL extra
+# (`pip install arunner[tui]`); it is imported LAZILY here so the bare install
+# stays dependency-free and the engine/ticker/monitor path never imports it.
+# `arunner monitor` remains the always-available zero-dependency fallback.
+def cmd_tui(args) -> int:
+    run_dir = Path(args.run_dir).resolve() if args.run_dir else None
+    if run_dir is not None and not (run_dir / "harness_status.json").is_file():
+        print("arunner tui: not a run-dir (no harness_status.json): %s" % run_dir,
+              file=sys.stderr)
+        return 2
+    try:
+        from arunner.tui import app as _tui_app          # lazy: needs [tui]
+    except ImportError:
+        print("arunner tui needs the optional Textual UI. Install it with:\n"
+              "    pip install 'arunner[tui]'\n"
+              "(The zero-dependency 'arunner monitor <run-dir>' is always "
+              "available as the stdlib fallback.)", file=sys.stderr)
+        return 3
+    runs_root = Path(args.runs_root).resolve() if args.runs_root else None
+    return _tui_app.run(runs_root=runs_root, run_dir=run_dir)
+
+
 def cmd_resume(args) -> int:
     run_dir = Path(args.run_dir).resolve()
     ticker_args = [sys.executable, str(_TICKER)]
@@ -561,13 +586,23 @@ def _build_parser() -> argparse.ArgumentParser:
                                        "(FR-60)")
     ox.add_argument("run_dir")
     ox.add_argument("--id", default=None, help="show only this message id's ack+result")
+
+    tu = sub.add_parser("tui", help="interactive read-only TUI: pick a run, watch "
+                                    "it live, drill into an entry, tail its log "
+                                    "(FR-62; needs the optional [tui] extra)")
+    tu.add_argument("run_dir", nargs="?", default=None,
+                    help="open this run directly (skip the picker)")
+    tu.add_argument("--runs-root", default=None,
+                    help="directory of run-dirs to list in the picker "
+                         "(default: ARUNNER_RUNS_DIR or <repo>/harness_runs)")
     return p
 
 
 _DISPATCH = {"run": cmd_run, "status": cmd_status, "stop": cmd_stop,
              "resume": cmd_resume, "summary": cmd_summary, "new": cmd_new,
              "expand": cmd_expand, "preview": cmd_preview, "add": cmd_add,
-             "monitor": cmd_monitor, "msg": cmd_msg, "outbox": cmd_outbox}
+             "monitor": cmd_monitor, "msg": cmd_msg, "outbox": cmd_outbox,
+             "tui": cmd_tui}
 
 
 def main(argv=None) -> int:
