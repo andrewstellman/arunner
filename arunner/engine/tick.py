@@ -639,8 +639,11 @@ def _step_hb(run_dir: Path, name: str, m: int) -> Path:
 
 
 def _run_hb_path(run_dir: Path, name: str, r: dict) -> Path:
-    """The heartbeat file the engine watches for a run: the CURRENT step's for a
-    multi-step run, else the single-prompt default (FR-20 override honored)."""
+    """The heartbeat file the engine watches for a run: the reasoning-gate judge's
+    while a gate is pending, the CURRENT step's for a multi-step run, else the
+    single-prompt default (FR-20 override honored)."""
+    if r.get("gate_pending") is not None:
+        return _judge_hb(run_dir, name, int(r["gate_pending"]))
     if r.get("step_count"):
         return _step_hb(run_dir, name, int(r.get("step_index", 0)))
     return _heartbeat_path(run_dir, name)
@@ -880,8 +883,21 @@ def _snapshot_entry_and_steps(entry: dict, base_dir: Path, rd: Path) -> dict:
         new_steps = []
         for m, step in enumerate(steps, start=1):
             if isinstance(step, dict):
-                snap = rd / "steps" / ("step-%02d" % m) / "prompt.snapshot.md"
-                step = _snapshot_prompt(step, base_dir, snap)
+                sdir = rd / "steps" / ("step-%02d" % m)
+                step = _snapshot_prompt(step, base_dir, sdir / "prompt.snapshot.md")
+                # FR-63: snapshot a reasoning gate's judge prompt-from-file too.
+                gate = step.get("gate")
+                if isinstance(gate, dict) and gate.get("judge_prompt_file"):
+                    content = _resolve_prompt_file(
+                        gate["judge_prompt_file"], base_dir).read_text(encoding="utf-8")
+                    snap = sdir / "gate" / "judge_prompt.snapshot.md"
+                    snap.parent.mkdir(parents=True, exist_ok=True)
+                    snap.write_text(content, encoding="utf-8")
+                    gate = dict(gate)
+                    gate["judge_prompt"] = content
+                    gate.pop("judge_prompt_file", None)
+                    step = dict(step)
+                    step["gate"] = gate
             new_steps.append(step)
         entry = dict(entry)
         entry["steps"] = new_steps
@@ -1632,13 +1648,207 @@ def _usage_of(hb: Path) -> dict:
     return out
 
 
-def _evaluate_gate(run_dir, name, m, step, entry, plan) -> str:
+_GATE_TIMEOUT_SECONDS = 30                 # a shell gate is a quick disk/exit probe
+
+
+def _judge_dir(run_dir: Path, name: str, m: int) -> Path:
+    return _step_dir(run_dir, name, m) / "gate"
+
+
+def _judge_hb(run_dir: Path, name: str, m: int) -> Path:
+    return _judge_dir(run_dir, name, m) / "heartbeat.ndjson"
+
+
+def _gate_values(run_dir, name, m, step, entry):
+    """The reserved-placeholder map for a gate (scoped to the step dir)."""
+    sd = _step_dir(run_dir, name, m)
+    return {
+        "HEARTBEAT_PATH": str(_step_hb(run_dir, name, m)),
+        "TASK_ID": str(entry.get("task_id", "")),
+        "RUN_DIR": str(sd),
+        "TARGET_REPO": str(step.get("target_repo") or entry.get("target_repo", "")),
+        "HARNESS_BIN": _HARNESS_BIN,
+    }
+
+
+def _gate_vars(plan, entry, step, r):
+    vmap = {}
+    for vsrc in (plan.get("vars"), entry.get("vars"), step.get("vars"), r.get("flags")):
+        if isinstance(vsrc, dict):
+            vmap.update(vsrc)
+    return vmap
+
+
+def _persist_gate(run_dir, name, m, record) -> None:
+    _write_json(_step_dir(run_dir, name, m) / "gate.json", record)
+
+
+def _evaluate_gate(run_dir, name, m, step, entry, plan, r=None) -> str:
     """FR-63/64: resolve the gate after step ``m`` completed clean -> a closed-set
-    FR-64 outcome string. No gate -> 'continue'. (Shell + reasoning kinds are
-    filled in by the FR-63 checkpoint; until then any declared gate continues.)"""
+    FR-64 outcome. No gate -> 'continue'. A persisted gate.json is read on resume
+    and NEVER recomputed (NFR-6). A shell gate runs argv and maps the EXIT CODE
+    (exit-code only -- no stdout/regex, FR-63 / Council FIX-5) to an outcome. A
+    reasoning gate is handled out-of-band (a judge sub-run); this function is
+    only reached for the deterministic shell path + persisted-verdict reads."""
     if not (isinstance(step, dict) and isinstance(step.get("gate"), dict)):
         return "continue"
-    return "continue"
+    gp = _step_dir(run_dir, name, m) / "gate.json"
+    if gp.exists():                                  # read-on-resume (NFR-6)
+        try:
+            return json.loads(gp.read_text(encoding="utf-8"))["outcome"]
+        except (OSError, ValueError, KeyError):
+            return "internal_error"
+    gate = step["gate"]
+    kind = gate.get("kind", "shell")
+    if kind != "shell":
+        # a reasoning gate is dispatched as a judge sub-run; never evaluated here
+        return "continue"
+    outcome = _eval_shell_gate(run_dir, name, m, step, entry, plan, gate, r)
+    if not _valid_outcome(outcome):
+        outcome = "internal_error"
+    _persist_gate(run_dir, name, m, {"step": _step_name(m), "kind": "shell",
+                                     "outcome": outcome, "ts": _utc_iso()})
+    return outcome
+
+
+def _eval_shell_gate(run_dir, name, m, step, entry, plan, gate, r) -> str:
+    """Run the gate argv; map its EXIT CODE to an FR-64 outcome. exit-code only:
+    no stdout is read (avoids the 'engine parses text' hazard, FR-40/41/56)."""
+    argv_tpl = gate.get("argv")
+    if not (isinstance(argv_tpl, list) and argv_tpl):
+        return "internal_error"
+    values = _gate_values(run_dir, name, m, step, entry)
+    vmap = _gate_vars(plan, entry, step, r or {})
+    argv = [_resolve_template(_apply_vars(str(tok), vmap), values) for tok in argv_tpl]
+    try:
+        proc = subprocess.run(argv, stdout=subprocess.DEVNULL,
+                              stderr=subprocess.DEVNULL, timeout=_GATE_TIMEOUT_SECONDS)
+        rc = proc.returncode
+    except (OSError, subprocess.SubprocessError):
+        return "internal_error"
+    outcomes = gate.get("outcomes") if isinstance(gate.get("outcomes"), dict) else {}
+    if str(rc) in outcomes:
+        return outcomes[str(rc)]
+    if "default" in gate:
+        return gate["default"]
+    return "continue" if rc == 0 else "halt"        # convention when unmapped
+
+
+def _judge_outcome_of(hb: Path):
+    """Read the judge's structured verdict (FR-18 ``data.verdict``) from its
+    terminal heartbeat -> a closed-set outcome string, or None (fail-closed)."""
+    for ln in reversed(_tail(hb)):
+        if _status_of_line(ln) in _TERMINAL_HB:
+            try:
+                obj = json.loads(ln)
+            except (ValueError, TypeError):
+                return None
+            v = obj.get("data", {}).get("verdict") if isinstance(obj.get("data"), dict) else None
+            if isinstance(v, dict):
+                return v.get("outcome")
+            return v if isinstance(v, str) else None
+    return None
+
+
+def _judge_identity_of(hb: Path) -> dict:
+    """Record WHO judged (FR-63 rule 1: judge identity recorded)."""
+    for ln in reversed(_tail(hb)):
+        if _status_of_line(ln) in _TERMINAL_HB:
+            try:
+                return {"task_id": json.loads(ln).get("task_id"),
+                        "verdict_source": "data.verdict"}
+            except (ValueError, TypeError):
+                break
+    return {"verdict_source": "data.verdict"}
+
+
+def _advance_judge(run_dir, name, r, entry, now, stall_secs, grace_secs,
+                   suppress_stall, plan):
+    """FR-63 reasoning gate: advance the JUDGE sub-run (a distinct judging
+    context at run-NN/steps/step-MM/gate/). On the judge's clean terminal, read
+    the structured verdict -> outcome (closed set; malformed/absent/FAILED ->
+    internal_error fail-closed), persist gate.json with the judge identity, then
+    apply the outcome. Verdict computed at most once, persisted, never recomputed."""
+    m = int(r["gate_pending"])
+    step = entry["steps"][m]
+    hb = _judge_hb(run_dir, name, m)
+    has_any, last_status, _a, mtime = _hb_observe(hb)
+    if has_any:
+        r["last_hb_status"] = last_status
+    terminal = _terminal_status_of(hb)
+
+    def _finish(outcome, judge):
+        if not _valid_outcome(outcome):
+            outcome = "internal_error"
+        _persist_gate(run_dir, name, m, {"step": _step_name(m), "kind": "reasoning",
+                                         "outcome": outcome, "judge": judge,
+                                         "ts": _utc_iso()})
+        r.pop("gate_pending", None)
+        _apply_gate_outcome(run_dir, name, r, entry, m, outcome, now)
+
+    if terminal is not None:
+        if terminal == "COMPLETED":
+            _finish(_judge_outcome_of(hb), _judge_identity_of(hb))
+        else:                                       # judge FAILED -> fail-closed
+            _finish("internal_error", _judge_identity_of(hb))
+        return
+    pid = _lock_pid_judge(run_dir, name, m)
+    if pid is not None and not _pid_alive(pid):
+        _finish("internal_error", {"verdict_source": "data.verdict"})
+        return
+    if r["state"] == "claimed" and not has_any:
+        if r.get("claimed_at") is None:
+            r["claimed_at"] = now
+        elif (now - r["claimed_at"]) > grace_secs:  # judge never launched
+            _finish("internal_error", {"verdict_source": "data.verdict"})
+        return
+    if has_any and mtime is not None:
+        if (now - mtime) > stall_secs and not suppress_stall:
+            r["state"] = "stalled"
+        elif r["state"] in ("claimed", "stalled"):
+            r["state"] = "running"
+
+
+def _lock_pid_judge(run_dir: Path, name: str, m: int):
+    lock = _judge_dir(run_dir, name, m) / "claim.lock"
+    if not lock.is_file():
+        return None
+    try:
+        return json.loads(lock.read_text(encoding="utf-8", errors="replace")).get("pid")
+    except (OSError, ValueError):
+        return None
+
+
+def _dispatch_judge(run_dir, name, r, entry, now, plan) -> dict:
+    """FR-63: dispatch the reasoning gate's judge as a DISTINCT subagent context
+    (run-NN/steps/step-MM/gate/). The judged step's artifacts are referenced via
+    the step dir; the judge writes a structured ``data.verdict`` terminal."""
+    m = int(r["gate_pending"])
+    step = entry["steps"][m]
+    gate = step["gate"]
+    jd = _judge_dir(run_dir, name, m)
+    jd.mkdir(parents=True, exist_ok=True)
+    hbp = jd / "heartbeat.ndjson"
+    if not hbp.exists():
+        hbp.touch()
+    values = {
+        "HEARTBEAT_PATH": str(_judge_hb(run_dir, name, m)),
+        "TASK_ID": "%s-%s-gate" % (entry.get("task_id", ""), _step_name(m)),
+        "RUN_DIR": str(jd),
+        "TARGET_REPO": str(step.get("target_repo") or entry.get("target_repo", "")),
+        "HARNESS_BIN": _HARNESS_BIN,
+        "STEP_DIR": str(_step_dir(run_dir, name, m)),   # the judged artifacts
+    }
+    vmap = _gate_vars(plan, entry, step, r)
+    judge_prompt = gate.get("judge_prompt", "")          # judge_prompt_file snapshotted at init
+    prompt = _resolve_template(_apply_vars(judge_prompt, vmap), values)
+    r["state"] = "claimed"
+    r["claimed_at"] = now
+    _log(run_dir, "%s: dispatched %s reasoning-gate judge (claimed)"
+         % (name, _step_name(m)))
+    return {"run": name, "step": "%s-gate" % _step_name(m),
+            "task_id": values["TASK_ID"], "dispatch_mode": "subagent",
+            "worker_prompt": prompt}
 
 
 def _lock_pid_step(run_dir: Path, name: str, m: int):
@@ -1774,6 +1984,10 @@ def _advance_multistep(run_dir, name, r, entry, now, stall_secs, grace_secs,
     state = r["state"]
     if state in _TERMINAL_STATES:
         return
+    if r.get("gate_pending") is not None:    # FR-63: a reasoning-gate judge is live
+        _advance_judge(run_dir, name, r, entry, now, stall_secs, grace_secs,
+                       suppress_stall, plan)
+        return
     m = int(r.get("step_index", 0))
     steps = entry["steps"]
     if m >= len(steps):                      # defensive: nothing to advance
@@ -1799,7 +2013,20 @@ def _advance_multistep(run_dir, name, r, entry, now, stall_secs, grace_secs,
             _log(run_dir, "%s: entry FAILED at %s (%s)"
                  % (name, _step_name(m), terminal))
             return
-        outcome = _evaluate_gate(run_dir, name, m, step, entry, plan)
+        gate = step.get("gate") if isinstance(step.get("gate"), dict) else None
+        gp_done = (_step_dir(run_dir, name, m) / "gate.json").exists()
+        if gate and gate.get("kind") == "reasoning" and not gp_done:
+            # FR-63: enter judging -- a DISTINCT judge sub-run produces the
+            # structured verdict; we dispatch it next and read it on a later tick.
+            r["gate_pending"] = m
+            r["state"] = "queued"
+            r["claimed_at"] = None
+            jd = _judge_dir(run_dir, name, m)
+            jd.mkdir(parents=True, exist_ok=True)
+            (jd / "heartbeat.ndjson").touch(exist_ok=True)
+            _log(run_dir, "%s: %s reasoning gate -> judging" % (name, _step_name(m)))
+            return
+        outcome = _evaluate_gate(run_dir, name, m, step, entry, plan, r)
         _apply_gate_outcome(run_dir, name, r, entry, m, outcome, now)
         return
     # no terminal: dead-PID (shell), launch grace, stall -- scoped to the step
@@ -1988,7 +2215,10 @@ def _dispatch(run_dir, runs, entries, pool_size, now, plan=None) -> list[dict]:
         if fresh and inflight >= pool_size:
             continue
         if _is_multistep(entry):
-            out.append(_dispatch_step(run_dir, name, r, entry, now, plan))
+            if r.get("gate_pending") is not None:    # FR-63: dispatch the judge
+                out.append(_dispatch_judge(run_dir, name, r, entry, now, plan))
+            else:
+                out.append(_dispatch_step(run_dir, name, r, entry, now, plan))
             if fresh:
                 inflight += 1
             continue
