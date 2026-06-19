@@ -73,6 +73,13 @@ _PLACEHOLDERS = ("HEARTBEAT_PATH", "TASK_ID", "RUN_DIR", "TARGET_REPO",
 # v1.5.9 Phase 2B: shell dispatch adds {PROMPT_FILE} (the per-job prompt
 # written to queue/job-NNNNN.prompt.txt for quoting/arg-length safety).
 _SHELL_PLACEHOLDERS = _PLACEHOLDERS + ("PROMPT_FILE",)
+# FR-61: the engine's RESERVED placeholder names (substituted mechanically at
+# dispatch). A plan/entry/step `vars` key may not be one of these, and a `vars`
+# VALUE may not contain one as a token -- so a designated-key {var} pass can
+# never spoof a dispatch-time path (both are --check errors). LOCK_FILE is the
+# FR-41 adapter PID backstop token, reserved for the same reason.
+_RESERVED_NAMES = frozenset(_SHELL_PLACEHOLDERS + ("LOCK_FILE",))
+_RESERVED_TOKENS = frozenset("{%s}" % n for n in _RESERVED_NAMES)
 # The engine knows its own bin directory (FR-21a {HARNESS_BIN}); a worker
 # never transcribes it.
 _HARNESS_BIN = str(Path(__file__).resolve().parent)
@@ -571,9 +578,16 @@ def init_run(plan_path: Path) -> Path:
     for sub in ("queue", "claimed", "results"):
         (run_dir / sub).mkdir(parents=True)
     runs: dict[str, dict] = {}
+    plan_dir = plan_path.resolve().parent          # FR-61: prompt-file base dir
     for i, entry in enumerate(entries, start=1):
         run_name = "run-%02d" % i
         job_id = "job-%05d" % i
+        # FR-61/62: snapshot any prompt-from-file (entry-level + per-step) into
+        # the run-dir so the run is a self-sufficient record (NFR-9); persist the
+        # snapshot back into plan.json's entry so every downstream path sees a
+        # normal inline prompt.
+        entry = _snapshot_entry_and_steps(entry, plan_dir, run_dir / run_name)
+        entries[i - 1] = entry
         runs[run_name] = _scaffold_run(run_dir, run_name, job_id, entry)
     _write_json(run_dir / "plan.json", plan)
     _write_json(run_dir / "harness_status.json", {
@@ -722,6 +736,81 @@ def _result_meta(hb: Path) -> dict:
 
 
 # --- the tick ---------------------------------------------------------------
+
+# --- FR-61: prompt-from-file + light {var} templating -----------------------
+
+def _apply_vars(text: str, vars_map: dict) -> str:
+    """FR-61: designated-key {var} substitution. A literal ``str.replace`` of
+    each DECLARED ``{key}`` -- it does NOT scan for or reject stray braces, so a
+    prompt that carries literal single-brace JSON (QPB's phase3/phase5 blocks)
+    survives untouched and never trips an unresolved-{name} error. Runs BEFORE
+    the engine's reserved placeholders (FR-3/21a)."""
+    if not vars_map:
+        return text
+    for k, v in vars_map.items():
+        text = text.replace("{%s}" % k, "" if v is None else str(v))
+    return text
+
+
+def _entry_vars(plan: dict, entry: dict, extra: dict = None) -> dict:
+    """The merged {var} map for an entry/step: plan-level ``vars`` < entry/step
+    ``vars`` < ``extra`` (FR-64 behavior-flags exposed to the next step). Later
+    wins. Non-dict ``vars`` are ignored (defended at --check)."""
+    merged = {}
+    for src in (plan.get("vars") if isinstance(plan.get("vars"), dict) else None,
+                entry.get("vars") if isinstance(entry.get("vars"), dict) else None,
+                extra if isinstance(extra, dict) else None):
+        if src:
+            merged.update(src)
+    return merged
+
+
+def _resolve_prompt_file(wpf: str, base_dir: Path) -> Path:
+    """FR-61: resolve ``worker_prompt_file`` -- absolute taken as-is, else
+    relative to ``base_dir`` (the plan file's directory at --init)."""
+    p = Path(wpf)
+    return p if p.is_absolute() else (base_dir / p)
+
+
+def _snapshot_prompt(entry: dict, base_dir: Path, snap_path: Path) -> dict:
+    """FR-61: if ``entry`` sources its prompt from a file, read it (resolved
+    relative to ``base_dir``), snapshot the bytes to ``snap_path`` in the
+    run-dir (NFR-9 self-sufficient record -- mutating the source after --init
+    never changes the run), and return a NEW entry with ``worker_prompt`` set to
+    the snapshot and ``worker_prompt_file`` removed, so every downstream path
+    (dispatch, --check re-probe) sees a normal inline prompt. A non-file entry is
+    returned unchanged. A read error raises (the caller surfaces it)."""
+    wpf = entry.get("worker_prompt_file")
+    if not wpf:
+        return entry
+    content = _resolve_prompt_file(wpf, base_dir).read_text(encoding="utf-8")
+    snap_path.parent.mkdir(parents=True, exist_ok=True)
+    snap_path.write_text(content, encoding="utf-8")
+    new = dict(entry)
+    new["worker_prompt"] = content
+    new.pop("worker_prompt_file", None)
+    return new
+
+
+def _snapshot_entry_and_steps(entry: dict, base_dir: Path, rd: Path) -> dict:
+    """FR-61/62: snapshot an entry's prompt-from-file AND each of its steps'
+    prompt-from-file into the run-dir. Returns a new entry with inline
+    ``worker_prompt`` filled and ``worker_prompt_file`` removed at both levels.
+    A single-prompt entry snapshots to ``run-NN/prompt.snapshot.md``; step MM
+    snapshots to ``run-NN/steps/step-MM/prompt.snapshot.md``."""
+    entry = _snapshot_prompt(entry, base_dir, rd / "prompt.snapshot.md")
+    steps = entry.get("steps")
+    if isinstance(steps, list) and steps:
+        new_steps = []
+        for m, step in enumerate(steps, start=1):
+            if isinstance(step, dict):
+                snap = rd / "steps" / ("step-%02d" % m) / "prompt.snapshot.md"
+                step = _snapshot_prompt(step, base_dir, snap)
+            new_steps.append(step)
+        entry = dict(entry)
+        entry["steps"] = new_steps
+    return entry
+
 
 def _dispatch_prompt(entry: dict, run_dir: Path, run_name: str) -> str:
     values = {
@@ -1524,7 +1613,9 @@ def _dispatch(run_dir, runs, entries, pool_size, now, plan=None) -> list[dict]:
         r["claimed_at"] = now
         r["dispatch_mode"] = mode
         inflight += 1
-        prompt = _resolve_template(entry.get("worker_prompt", ""), values)
+        # FR-61: apply the designated {var} pass BEFORE the reserved placeholders.
+        raw = _apply_vars(entry.get("worker_prompt", ""), _entry_vars(plan, entry))
+        prompt = _resolve_template(raw, values)
         if mode == "shell":
             # Write the prompt to a file (quoting/arg-length safety) and
             # resolve the worker_cmd template; the ticker Popens it detached.
@@ -1924,19 +2015,213 @@ def _check_adapter_entry(tag: str, e: dict) -> list:
     return p
 
 
-def _check_entry(i: int, e, run_auth: bool) -> list:
+# --- FR-63/64: continuation gates --------------------------------------------
+_GATE_KINDS = ("shell", "reasoning")
+# FR-64 closed outcome set (plus the parametric ``behavior-flag:<name>``).
+_GATE_OUTCOME_SET = frozenset(("continue", "halt", "skip-to-next", "internal_error"))
+_STEP_ID_RE = __import__("re").compile(r"^step-[0-9]{2,}$")
+
+
+def _valid_outcome(s) -> bool:
+    if not isinstance(s, str):
+        return False
+    if s in _GATE_OUTCOME_SET:
+        return True
+    return s.startswith("behavior-flag:") and len(s) > len("behavior-flag:")
+
+
+def _check_gate(tag: str, gate, plan: dict) -> list:
+    """FR-63/64: validate a per-step ``gate``. A shell gate is the deterministic
+    default (exit-code -> closed-set outcome). A reasoning gate is FENCED: it
+    requires plan-level ``allow_reasoning_gates:true``, is rejected in a
+    ``measurement:true`` run, and demands a DISTINCT judge (a same-context judge
+    is a --check error -- upholds FR-51 'never grades its own homework')."""
+    g = "%s.gate" % tag
+    if not isinstance(gate, dict):
+        return ["%s: must be a JSON object" % g]
+    p = []
+    kind = gate.get("kind")
+    if kind not in _GATE_KINDS:
+        p.append("%s.kind: must be one of %s (got %r)"
+                 % (g, list(_GATE_KINDS), kind))
+    outcomes = gate.get("outcomes")
+    if outcomes is not None:
+        if not isinstance(outcomes, dict):
+            p.append("%s.outcomes: must be an object mapping exit-code strings "
+                     "to closed-set outcomes" % g)
+        else:
+            for code, oc in outcomes.items():
+                if not _valid_outcome(oc):
+                    p.append("%s.outcomes[%s]: %r is not a closed-set gate "
+                             "outcome" % (g, code, oc))
+    if "default" in gate and not _valid_outcome(gate["default"]):
+        p.append("%s.default: %r is not a closed-set gate outcome"
+                 % (g, gate["default"]))
+    if "skip_to" in gate and not (isinstance(gate["skip_to"], str)
+                                  and _STEP_ID_RE.match(gate["skip_to"])):
+        p.append("%s.skip_to: must look like 'step-MM' (got %r)"
+                 % (g, gate.get("skip_to")))
+    if kind == "shell":
+        argv = gate.get("argv")
+        if not (isinstance(argv, list) and argv
+                and all(isinstance(t, str) for t in argv)):
+            p.append("%s.argv: a shell gate requires a non-empty array of "
+                     "strings" % g)
+    elif kind == "reasoning":
+        if not plan.get("allow_reasoning_gates"):
+            p.append("%s: a reasoning gate requires plan-level "
+                     "allow_reasoning_gates:true (FR-63 fence)" % g)
+        if plan.get("measurement"):
+            p.append("%s: a reasoning gate is rejected in a measurement run "
+                     "(only deterministic shell gates are allowed)" % g)
+        has_judge = ((isinstance(gate.get("judge_prompt"), str) and gate.get("judge_prompt"))
+                     or (isinstance(gate.get("judge_prompt_file"), str)
+                         and gate.get("judge_prompt_file")))
+        if gate.get("same_context"):
+            p.append("%s: a reasoning gate may NOT judge in the same context as "
+                     "the step it judges (FR-51); supply a distinct judge_prompt" % g)
+        if not has_judge:
+            p.append("%s: a reasoning gate requires a distinct judge_prompt or "
+                     "judge_prompt_file (separate judging context, FR-51)" % g)
+    return p
+
+
+def _check_vars(tag: str, vars_map) -> list:
+    """FR-61: a `vars` map must be a flat object of string->scalar. A key may not
+    be a reserved engine placeholder name, and a value may not contain a reserved
+    {TOKEN} -- so the designated-key {var} pass can never spoof a dispatch path."""
+    if vars_map is None:
+        return []
+    if not isinstance(vars_map, dict):
+        return ["%s.vars: must be a flat object of string->string" % tag]
+    p = []
+    for k, v in vars_map.items():
+        if not (isinstance(k, str) and k):
+            p.append("%s.vars: keys must be non-empty strings" % tag)
+            continue
+        if k in _RESERVED_NAMES:
+            p.append("%s.vars: key %r collides with a reserved engine "
+                     "placeholder name" % (tag, k))
+        if isinstance(v, bool) or not isinstance(v, (str, int, float)):
+            p.append("%s.vars[%s]: value must be a string or number" % (tag, k))
+            continue
+        sval = str(v)
+        for tok in _RESERVED_TOKENS:
+            if tok in sval:
+                p.append("%s.vars[%s]: value may not contain a reserved engine "
+                         "token %s" % (tag, k, tok))
+                break
+    return p
+
+
+def _resolve_check_prompt(tag: str, e: dict, plan_dir: Path):
+    """Return (prompt_text, error_or_None) for an inline OR file-sourced prompt,
+    reading the file (FR-61) so the placeholder checks run over its content."""
+    wpf = e.get("worker_prompt_file")
+    if isinstance(wpf, str) and wpf:
+        try:
+            return _resolve_prompt_file(wpf, plan_dir).read_text(encoding="utf-8"), None
+        except OSError as exc:
+            return None, ("%s.worker_prompt_file: cannot read %s (%s)"
+                          % (tag, wpf, exc))
+    wp = e.get("worker_prompt")
+    return (wp if isinstance(wp, str) else ""), None
+
+
+def _check_dispatch_prompt(tag: str, e: dict, prompt: str) -> list:
+    """The dispatch-mode + placeholder checks for a single-prompt entry/step,
+    operating on the RESOLVED prompt text (inline or file-snapshot). Reuses the
+    engine placeholder tuples so --check can never drift from _dispatch."""
+    p = []
+    mode = e.get("dispatch_mode")
+    if mode not in _VALID_DISPATCH_MODES:
+        p.append("%s.dispatch_mode: must be one of %s (got %r)"
+                 % (tag, list(_VALID_DISPATCH_MODES), mode))
+    cmd = e.get("worker_cmd") if isinstance(e.get("worker_cmd"), list) else []
+    cmd_text = " ".join(t for t in cmd if isinstance(t, str))
+    if mode == "subagent":
+        for ph in _PLACEHOLDERS:
+            if ("{%s}" % ph) not in prompt:
+                p.append("%s.worker_prompt: missing placeholder {%s}" % (tag, ph))
+    elif mode == "shell":
+        if not cmd:
+            p.append("%s.worker_cmd: required (non-empty) for shell dispatch" % tag)
+        else:
+            hb = "{%s}" % _HEARTBEAT_PLACEHOLDER
+            via_cmd = hb in cmd_text
+            via_prompt = ("{PROMPT_FILE}" in cmd_text) and (hb in prompt)
+            if not (via_cmd or via_prompt):
+                p.append("%s: shell entry has no route for %s -- put it in "
+                         "worker_cmd, or reference {PROMPT_FILE} in worker_cmd "
+                         "with the prompt carrying it" % (tag, hb))
+    # typo / drift catch: only UPPERCASE {TOKEN}s are placeholder-shaped, so a
+    # lowercase {var} or literal single-brace JSON is invisible here (FR-61).
+    for tok in sorted(set(_PLACEHOLDER_TOKEN_RE.findall(prompt + " " + cmd_text))):
+        if tok not in _KNOWN_PLACEHOLDERS:
+            p.append("%s: unknown placeholder {%s} (known: %s)"
+                     % (tag, tok, ", ".join(sorted(_KNOWN_PLACEHOLDERS))))
+    return p
+
+
+def _check_steps(tag: str, e: dict, plan_dir: Path, plan: dict) -> list:
+    """FR-62: validate a multi-step entry's ``steps`` -- non-empty array; each
+    step its own single prompt source + optional vars + optional FR-63 gate."""
+    p = []
+    steps = e.get("steps")
+    if not (isinstance(steps, list) and steps):
+        return ["%s.steps: must be a non-empty array of step objects" % tag]
+    for m, step in enumerate(steps):
+        stag = "%s.steps[%d]" % (tag, m)
+        if not isinstance(step, dict):
+            p.append("%s: must be a JSON object" % stag)
+            continue
+        ssrc = [n for n, ok in (
+            ("worker_prompt", isinstance(step.get("worker_prompt"), str) and step.get("worker_prompt")),
+            ("worker_prompt_file", isinstance(step.get("worker_prompt_file"), str) and step.get("worker_prompt_file")),
+            ("adapter", bool(step.get("adapter"))),
+        ) if ok]
+        if len(ssrc) != 1:
+            p.append("%s: needs exactly one prompt source -- worker_prompt, "
+                     "worker_prompt_file, or adapter (got %s)"
+                     % (stag, ", ".join(ssrc) or "none"))
+        p.extend(_check_vars(stag, step.get("vars")))
+        prompt, perr = _resolve_check_prompt(stag, step, plan_dir)
+        if perr:
+            p.append(perr)
+        elif len(ssrc) == 1 and ssrc[0] == "adapter":
+            p.extend(_check_adapter_entry(stag, step))
+        elif len(ssrc) == 1:
+            mode = step.get("dispatch_mode", "subagent")     # steps default subagent
+            p.extend(_check_dispatch_prompt(stag, dict(step, dispatch_mode=mode), prompt))
+        if "gate" in step:
+            p.extend(_check_gate(stag, step.get("gate"), plan))
+    return p
+
+
+def _check_entry(i: int, e, run_auth: bool, plan_dir: Path, plan: dict) -> list:
     tag = "entries[%d]" % i
     if not isinstance(e, dict):
         return ["%s: must be a JSON object" % tag]
     p = []
-    # task_id / target_repo always required; worker_prompt required EXCEPT for
-    # an adapter entry (the adapter synthesizes its own plumbing, FR-41).
-    is_adapter = bool(e.get("adapter"))
-    required = ("task_id", "target_repo") if is_adapter else (
-        "task_id", "target_repo", "worker_prompt")
-    for key in required:
+    # task_id / target_repo always required.
+    for key in ("task_id", "target_repo"):
         if not (isinstance(e.get(key), str) and e.get(key)):
             p.append("%s.%s: required non-empty string" % (tag, key))
+    # FR-61/62: EXACTLY ONE prompt source (the plan.schema.json oneOf):
+    # worker_prompt | worker_prompt_file | steps | adapter.
+    sources = [n for n, ok in (
+        ("worker_prompt", isinstance(e.get("worker_prompt"), str) and e.get("worker_prompt")),
+        ("worker_prompt_file", isinstance(e.get("worker_prompt_file"), str) and e.get("worker_prompt_file")),
+        ("steps", isinstance(e.get("steps"), list) and e.get("steps")),
+        ("adapter", bool(e.get("adapter"))),
+    ) if ok]
+    if len(sources) == 0:
+        p.append("%s: needs exactly one prompt source -- worker_prompt, "
+                 "worker_prompt_file, steps, or adapter" % tag)
+    elif len(sources) > 1:
+        p.append("%s: exactly one of {worker_prompt, worker_prompt_file, steps, "
+                 "adapter} is allowed (got %s)" % (tag, ", ".join(sources)))
+    p.extend(_check_vars(tag, e.get("vars")))            # FR-61 entry-level vars
     # optional typed fields
     if "heartbeat_path" in e and not isinstance(e["heartbeat_path"], str):
         p.append("%s.heartbeat_path: must be a string" % tag)
@@ -1945,46 +2230,24 @@ def _check_entry(i: int, e, run_auth: bool) -> list:
                              and all(isinstance(t, str) for t in e[key])):
             p.append("%s.%s: must be an array of strings" % (tag, key))
 
-    if is_adapter:
-        # The engine builds the worker_cmd from the adapter config; validate
-        # that config and SKIP the manual worker_prompt/placeholder checks.
+    primary = sources[0] if len(sources) == 1 else None
+    if primary == "adapter":
         p.extend(_check_adapter_entry(tag, e))
-    else:
-        mode = e.get("dispatch_mode")
-        if mode not in _VALID_DISPATCH_MODES:
-            p.append("%s.dispatch_mode: must be one of %s (got %r)"
-                     % (tag, list(_VALID_DISPATCH_MODES), mode))
-        prompt = e.get("worker_prompt") if isinstance(e.get("worker_prompt"), str) else ""
-        cmd = e.get("worker_cmd") if isinstance(e.get("worker_cmd"), list) else []
-        cmd_text = " ".join(t for t in cmd if isinstance(t, str))
-        # placeholder presence -- reuse the engine tuples so it can't drift
-        if mode == "subagent":
-            for ph in _PLACEHOLDERS:
-                if ("{%s}" % ph) not in prompt:
-                    p.append("%s.worker_prompt: missing placeholder {%s}" % (tag, ph))
-        elif mode == "shell":
-            if not cmd:
-                p.append("%s.worker_cmd: required (non-empty) for shell dispatch" % tag)
-            else:
-                hb = "{%s}" % _HEARTBEAT_PLACEHOLDER
-                via_cmd = hb in cmd_text
-                via_prompt = ("{PROMPT_FILE}" in cmd_text) and (hb in prompt)
-                if not (via_cmd or via_prompt):
-                    p.append("%s: shell entry has no route for %s -- put it in "
-                             "worker_cmd, or reference {PROMPT_FILE} in worker_cmd "
-                             "with the prompt carrying it" % (tag, hb))
-        # typo / drift catch: any placeholder-shaped token that isn't a known one
-        for tok in sorted(set(_PLACEHOLDER_TOKEN_RE.findall(prompt + " " + cmd_text))):
-            if tok not in _KNOWN_PLACEHOLDERS:
-                p.append("%s: unknown placeholder {%s} (known: %s)"
-                         % (tag, tok, ", ".join(sorted(_KNOWN_PLACEHOLDERS))))
-        # optional auth_check (opt-in: external commands only run with --run-auth)
-        if run_auth and mode == "shell" and isinstance(e.get("auth_check"), list) and e["auth_check"]:
-            rc, detail = _run_auth_check(e["auth_check"])
-            if rc != 0:
-                p.append("%s.auth_check: failed (%s)" % (tag, detail))
+    elif primary == "steps":
+        p.extend(_check_steps(tag, e, plan_dir, plan))
+    elif primary in ("worker_prompt", "worker_prompt_file"):
+        prompt, perr = _resolve_check_prompt(tag, e, plan_dir)
+        if perr:
+            p.append(perr)
+        else:
+            p.extend(_check_dispatch_prompt(tag, e, prompt))
+            if (run_auth and e.get("dispatch_mode") == "shell"
+                    and isinstance(e.get("auth_check"), list) and e["auth_check"]):
+                rc, detail = _run_auth_check(e["auth_check"])
+                if rc != 0:
+                    p.append("%s.auth_check: failed (%s)" % (tag, detail))
 
-    # target_repo existence (both paths)
+    # target_repo existence (all paths)
     tr = e.get("target_repo")
     if isinstance(tr, str) and tr and not Path(tr).is_dir():
         p.append("%s.target_repo: not an existing directory: %s" % (tag, tr))
@@ -2008,12 +2271,18 @@ def check_plan(plan_path, run_auth: bool = False) -> list:
             problems.append("plan.%s: must be an integer >= 1 (got %r)" % (k, plan[k]))
     if "schema_version" in plan and not isinstance(plan["schema_version"], str):
         problems.append("plan.schema_version: must be a string")
+    if "vars" in plan:                                   # FR-61 plan-level vars
+        problems.extend(_check_vars("plan", plan["vars"]))
+    for bkey in ("allow_reasoning_gates", "measurement"):  # FR-63 fences
+        if bkey in plan and not isinstance(plan[bkey], bool):
+            problems.append("plan.%s: must be a boolean" % bkey)
     entries = plan.get("entries")
     if not isinstance(entries, list) or not entries:
         problems.append("plan.entries: a non-empty array is required")
         return problems                      # nothing per-entry to check
+    plan_dir = Path(plan_path).resolve().parent          # FR-61 prompt-file base
     for i, e in enumerate(entries):
-        problems.extend(_check_entry(i, e, run_auth))
+        problems.extend(_check_entry(i, e, run_auth, plan_dir, plan))
 
     # FR-58a: the keepalive/activity-refresh interval must land WITHIN launch
     # grace (else the first IN_PROGRESS never beats LAUNCH-FAIL). Fail-loud at
