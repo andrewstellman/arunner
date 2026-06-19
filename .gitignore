@@ -7,3 +7,10 @@ build/
 node_modules/
 *.tgz
 .DS_Store
+.claude/
+
+# Worker runner: track the bootstrap + instruction/output/review record; ignore per-cycle churn
+runner/STATUS.md
+runner/STOP
+runner/.claude/
+runner/security-run-*.txt
