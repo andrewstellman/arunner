@@ -90,6 +90,24 @@ arunner owns the launch; **tail** when something else does. Prefer `wrap`/
 `tail` over a hand-written `worker_cmd` — the adapter wires the heartbeat
 plumbing for you.
 
+> **Why subagent is the default for *agent* work — and the one anti-pattern to refuse.**
+> Subagent dispatch is the **reason this mode exists**: when a step's job is "drive an
+> AI agent," the orchestrator spawns that agent **in-session** via its Task/Agent tool,
+> and the tick engine tracks it by heartbeat. A **multi-phase agent pipeline** (e.g.
+> running a Quality-Playbook-style phase pipeline against a repo) is a **subagent
+> multi-step entry** — one subagent per phase, with a deterministic gate between phases —
+> *not* a sequence of `shell` jobs.
+>
+> **Do not shell out to `claude -p` / `claude --print` per step.** That re-creates a
+> per-step *headless-CLI launcher*: it forfeits in-session orchestration and liveness,
+> hits the documented `claude -p` failure modes (silent exit on a large prompt;
+> `--max-turns 1` default), and reproduces the exact "run the agent as a subprocess
+> per phase" shape arunner was built to replace (it is what Quality Playbook's retired
+> `run_playbook` did). `shell` / `wrap` / `tail` are for wrapping **real tools** — a
+> test, a build, a scanner, a non-AI CLI, a log-writer — and for **unattended cadence**
+> (rungs 2–4). They are not for relaunching the agent itself. If you catch a plan
+> shelling the agent per step, convert it to a subagent multi-step entry.
+
 **Step 3 — choose the form.** Default to the **`jobs:` shorthand** (one line
 per job; the expander injects placeholders and adapter plumbing). Drop to the
 **full plan** only when you need a field the shorthand doesn't expose. Either

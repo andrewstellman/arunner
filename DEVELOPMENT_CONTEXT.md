@@ -31,6 +31,23 @@ doc wins.*
   subagent / 2 detached shell). Rungs 2–4 require shell dispatch. The disk
   state machine is identical at every rung; the worst case (rung 3 + shell,
   locked-down Windows) must work. (FR-22..FR-26a)
+- **Dispatch — subagent is the model for *agent* work; shell is for *tools*.**
+  This axis is the one most easily misread, so state it plainly. **Subagent**
+  dispatch is the whole reason arunner exists: when a step is "drive an AI
+  agent," the orchestrator spawns that agent **in-session** (its Task/Agent
+  tool) and the engine tracks it by heartbeat — and a multi-phase agent
+  pipeline is a **subagent multi-step entry** (one subagent per phase,
+  deterministic gate between). **Shell/wrap/tail** is for wrapping a **real
+  tool** (test, build, scanner, non-AI CLI, log-writer) or running **unattended**
+  (cadence rungs 2–4). The **anti-pattern** is using shell to relaunch the agent
+  itself — shelling `claude -p` / `claude --print` per step. That forfeits
+  in-session orchestration + liveness, hits the `claude -p` failure modes
+  (silent exit on large prompts; `--max-turns 1`), and reproduces the
+  run-the-agent-as-a-subprocess shape arunner was built to replace — it is
+  exactly what Quality Playbook's retired `run_playbook` did. If a plan shells
+  the agent per step, it is wrong by construction; convert it to subagent
+  multi-step. (The QPB v1.5.10 integration/regression test is the reference
+  example: phases 1–3 as subagent steps with `validate_phase_artifacts` gates.)
 
 ## Design lineage (born in Quality Playbook v1.5.9)
 
