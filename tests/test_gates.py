@@ -11,10 +11,14 @@ sub-run writing a structured data.verdict); a same-context judge is a --check
 error; a malformed/absent verdict halts fail-closed.
 
 MUTATION-VERIFY EVIDENCE (instr 002):
-  Pin: test_shell_gate_recorded_and_read_on_resume.
+  Pin: test_gate_read_on_resume_after_crash_does_not_rerun_argv.
     Mutation: in _evaluate_gate, drop the `if gp.exists(): return ...` read-on-
-      resume guard so the argv re-runs each tick. Observed: the gate argv's
-      counter increments past 1 and the test FAILs. Restored -> OK.
+      resume guard so a persisted verdict is recomputed. Observed: after a crash
+      between gate-persist and step-advance, the resume tick RE-RUNS the argv
+      (the counter file appears) and the test FAILs. Restored -> OK. (The plain
+      re-tick in test_shell_gate_recorded_and_read_on_resume does NOT bite this
+      guard -- step_index has already advanced past the gated step -- so this
+      crash-window test is the one that pins the read-on-resume guard.)
   Pin: test_shell_out_of_set_outcome_is_internal_error.
     Mutation: in _evaluate_gate, skip the `if not _valid_outcome: internal_error`
       coercion. Observed: a bogus outcome is applied instead of fail-closed halt
@@ -177,6 +181,24 @@ class ShellGateTests(_Base):
         self.assertEqual(counter.read_text(), "1")
         T.tick(rd); T.tick(rd)                      # resume: gate.json read, no re-run
         self.assertEqual(counter.read_text(), "1")
+
+    def test_gate_read_on_resume_after_crash_does_not_rerun_argv(self):
+        # Crash window: gate.json persisted, but the process died BEFORE the step
+        # advanced. On resume the engine reaps the still-current COMPLETED step
+        # and MUST read the persisted verdict, never re-run the argv (NFR-6).
+        counter = self.tmp / "gc.txt"
+        argv = [_PY, "-c", "open(%r,'a').write('1')" % str(counter)]
+        e = {"task_id": "t", "target_repo": "/tmp", "dispatch_mode": "subagent",
+             "steps": [_step("a", gate={"kind": "shell", "argv": argv}), _step("b")]}
+        rd = self._init({"pool_size": 1, "entries": [e]})
+        T.tick(rd)
+        self._complete(rd, "run-01", 0)
+        # simulate the crash: verdict already on disk, step NOT yet advanced
+        T._persist_gate(rd, "run-01", 0, {"step": "step-01", "kind": "shell",
+                                          "outcome": "continue", "ts": "x"})
+        out = T.tick(rd)                            # resume: reap step-01 -> read verdict
+        self.assertFalse(counter.exists())          # argv NEVER ran (read-on-resume)
+        self.assertEqual([x["step"] for x in out["dispatch_list"]], ["step-02"])
 
 
 class ReasoningGateCheckTests(_Base):

@@ -7,11 +7,13 @@ predecessor's clean terminal. Resume reads step_index and reaps-not-re-runs
 completed steps (NFR-6). step_index/step_count surface on disk + in the table.
 
 MUTATION-VERIFY EVIDENCE (instr 002):
-  Pin: test_resume_does_not_rerun_completed_steps.
-    Mutation: in _advance_multistep, drop the `if rp.exists(): return` guard in
-      _reap_step so a completed step is re-reaped, OR re-scaffold+re-dispatch a
-      completed step. Observed: step-01's heartbeat/result change across ticks
-      and the test FAILs. Restored -> OK.
+  Pin: test_step_reap_is_idempotent.
+    Mutation: in _reap_step, drop the `if rp.exists(): return` guard. Observed:
+      a second reap of an already-reaped step OVERWRITES its result.json (a
+      changed terminal_status) and the test FAILs. Restored -> OK. (The
+      no-rerun-on-resume property is independently proven by
+      test_resume_does_not_rerun_completed_steps via observable disk invariance +
+      the step-03 dispatch assertion; this test pins the reap idempotency guard.)
   Pin: test_pool1_second_entry_waits.
     Mutation: make _holds_slot return False for a started multi-step run between
       steps. Observed: the second entry dispatches while the first is mid-
@@ -155,6 +157,19 @@ class ResumeTests(_Base):
         self._complete_step(rd, "run-01", 1)
         out = T.tick(rd)
         self.assertEqual([x["step"] for x in out["dispatch_list"]], ["step-03"])
+
+    def test_step_reap_is_idempotent(self):
+        rd = self._init({"pool_size": 1, "entries": [_ms_entry("t1", 2)]})
+        T.tick(rd)
+        self._complete_step(rd, "run-01", 0)
+        T.tick(rd)                                  # step-01 reaped (COMPLETED)
+        rp = rd / "run-01" / "steps" / "step-01" / "result.json"
+        first = rp.read_text()
+        # a second reap attempt with a DIFFERENT terminal must be a no-op
+        T._reap_step(rd, "run-01", 0, "FAILED",
+                     rd / "run-01" / "steps" / "step-01" / "heartbeat.ndjson")
+        self.assertEqual(rp.read_text(), first)     # unchanged (idempotent)
+        self.assertEqual(json.loads(first)["terminal_status"], "COMPLETED")
 
     def test_crash_between_reap_and_dispatch_resumes(self):
         rd = self._init({"pool_size": 1, "entries": [_ms_entry("t1", 3)]})
