@@ -1,18 +1,17 @@
 {
   "description": "Autonomous multi-tick loop: 3 stub workers dispatched, each heartbeats then completes; the run reaches done across ticks.",
   "plan": {
-    "schema_version": "1",
+    "schema_version": "2",
     "tick_interval_minutes": 1,
     "pool_size": 3,
     "stall_threshold_minutes": 45,
     "launch_grace_minutes": 10,
-    "entries": [
+    "jobs": [
       {
-        "task_id": "auto-1",
-        "target_repo": "{SCENARIO_DIR}",
-        "dispatch_mode": "shell",
-        "worker_prompt": "stub auto-1",
-        "worker_cmd": [
+        "id": "auto-1",
+        "repo": "{SCENARIO_DIR}",
+        "mode": "shell",
+        "command": [
           "python3",
           "{STUB}",
           "--heartbeat",
@@ -28,11 +27,10 @@
         ]
       },
       {
-        "task_id": "auto-2",
-        "target_repo": "{SCENARIO_DIR}",
-        "dispatch_mode": "shell",
-        "worker_prompt": "stub auto-2",
-        "worker_cmd": [
+        "id": "auto-2",
+        "repo": "{SCENARIO_DIR}",
+        "mode": "shell",
+        "command": [
           "python3",
           "{STUB}",
           "--heartbeat",
@@ -48,11 +46,10 @@
         ]
       },
       {
-        "task_id": "auto-3",
-        "target_repo": "{SCENARIO_DIR}",
-        "dispatch_mode": "shell",
-        "worker_prompt": "stub auto-3",
-        "worker_cmd": [
+        "id": "auto-3",
+        "repo": "{SCENARIO_DIR}",
+        "mode": "shell",
+        "command": [
           "python3",
           "{STUB}",
           "--heartbeat",

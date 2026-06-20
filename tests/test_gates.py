@@ -51,7 +51,8 @@ _PY = sys.executable or "python3"
 
 
 def _step(label, gate=None, **extra):
-    s = {"label": label, "worker_prompt": label + " " + _PH}
+    # bare agent prompt (the engine auto-injects the placeholder preamble)
+    s = {"label": label, "mode": "agent", "prompt": label}
     if gate is not None:
         s["gate"] = gate
     s.update(extra)
@@ -102,10 +103,10 @@ def _exit_argv(code):
 
 class ShellGateTests(_Base):
     def test_exit0_continue_advances(self):
-        e = {"task_id": "t", "target_repo": "/tmp", "dispatch_mode": "subagent",
+        e = {"id": "t", "repo": "/tmp", "mode": "pipeline",
              "steps": [_step("a", gate={"kind": "shell", "argv": _exit_argv(0)}),
                        _step("b")]}
-        rd = self._init({"pool_size": 1, "entries": [e]})
+        rd = self._init({"pool_size": 1, "jobs": [e]})
         T.tick(rd)
         self._complete(rd, "run-01", 0)
         out = T.tick(rd)
@@ -113,10 +114,10 @@ class ShellGateTests(_Base):
         self.assertEqual([x["step"] for x in out["dispatch_list"]], ["step-02"])
 
     def test_nonzero_halts_entry(self):
-        e = {"task_id": "t", "target_repo": "/tmp", "dispatch_mode": "subagent",
+        e = {"id": "t", "repo": "/tmp", "mode": "pipeline",
              "steps": [_step("a", gate={"kind": "shell", "argv": _exit_argv(1)}),
                        _step("b")]}
-        rd = self._init({"pool_size": 1, "entries": [e]})
+        rd = self._init({"pool_size": 1, "jobs": [e]})
         T.tick(rd)
         self._complete(rd, "run-01", 0)
         T.tick(rd)
@@ -127,11 +128,11 @@ class ShellGateTests(_Base):
         self.assertEqual(rec["terminal_status"], "FAILED")
 
     def test_skip_to_next_synthesizes_skipped(self):
-        e = {"task_id": "t", "target_repo": "/tmp", "dispatch_mode": "subagent",
+        e = {"id": "t", "repo": "/tmp", "mode": "pipeline",
              "steps": [_step("a", gate={"kind": "shell", "argv": _exit_argv(3),
                                         "outcomes": {"3": "skip-to-next"}}),
                        _step("b"), _step("c")]}
-        rd = self._init({"pool_size": 1, "entries": [e]})
+        rd = self._init({"pool_size": 1, "jobs": [e]})
         T.tick(rd)
         self._complete(rd, "run-01", 0)
         out = T.tick(rd)
@@ -141,11 +142,12 @@ class ShellGateTests(_Base):
         self.assertEqual([x["step"] for x in out["dispatch_list"]], ["step-03"])
 
     def test_behavior_flag_exposed_as_next_step_var(self):
-        e = {"task_id": "t", "target_repo": "/tmp", "dispatch_mode": "subagent",
+        e = {"id": "t", "repo": "/tmp", "mode": "pipeline",
              "steps": [_step("a", gate={"kind": "shell", "argv": _exit_argv(7),
                                         "outcomes": {"7": "behavior-flag:phase3_skipped"}}),
-                       {"label": "b", "worker_prompt": "flag={phase3_skipped} " + _PH}]}
-        rd = self._init({"pool_size": 1, "entries": [e]})
+                       {"label": "b", "mode": "agent",
+                        "prompt": "flag={phase3_skipped}"}]}
+        rd = self._init({"pool_size": 1, "jobs": [e]})
         T.tick(rd)
         self._complete(rd, "run-01", 0)
         out = T.tick(rd)
@@ -158,11 +160,11 @@ class ShellGateTests(_Base):
     def test_shell_out_of_set_outcome_is_internal_error(self):
         # bypasses --check (init does not --check): a mapped bogus outcome must
         # be coerced to internal_error (fail-closed halt) at runtime.
-        e = {"task_id": "t", "target_repo": "/tmp", "dispatch_mode": "subagent",
+        e = {"id": "t", "repo": "/tmp", "mode": "pipeline",
              "steps": [_step("a", gate={"kind": "shell", "argv": _exit_argv(0),
                                         "outcomes": {"0": "frobnicate"}}),
                        _step("b")]}
-        rd = self._init({"pool_size": 1, "entries": [e]})
+        rd = self._init({"pool_size": 1, "jobs": [e]})
         T.tick(rd)
         self._complete(rd, "run-01", 0)
         T.tick(rd)
@@ -172,9 +174,9 @@ class ShellGateTests(_Base):
     def test_shell_gate_recorded_and_read_on_resume(self):
         counter = self.tmp / "gatecount.txt"
         argv = [_PY, "-c", "open(%r,'a').write('1')" % str(counter)]
-        e = {"task_id": "t", "target_repo": "/tmp", "dispatch_mode": "subagent",
+        e = {"id": "t", "repo": "/tmp", "mode": "pipeline",
              "steps": [_step("a", gate={"kind": "shell", "argv": argv}), _step("b")]}
-        rd = self._init({"pool_size": 1, "entries": [e]})
+        rd = self._init({"pool_size": 1, "jobs": [e]})
         T.tick(rd)
         self._complete(rd, "run-01", 0)
         T.tick(rd)                                  # gate runs once -> advances
@@ -188,9 +190,9 @@ class ShellGateTests(_Base):
         # and MUST read the persisted verdict, never re-run the argv (NFR-6).
         counter = self.tmp / "gc.txt"
         argv = [_PY, "-c", "open(%r,'a').write('1')" % str(counter)]
-        e = {"task_id": "t", "target_repo": "/tmp", "dispatch_mode": "subagent",
+        e = {"id": "t", "repo": "/tmp", "mode": "pipeline",
              "steps": [_step("a", gate={"kind": "shell", "argv": argv}), _step("b")]}
-        rd = self._init({"pool_size": 1, "entries": [e]})
+        rd = self._init({"pool_size": 1, "jobs": [e]})
         T.tick(rd)
         self._complete(rd, "run-01", 0)
         # simulate the crash: verdict already on disk, step NOT yet advanced
@@ -210,41 +212,41 @@ class ReasoningGateCheckTests(_Base):
     def _reasoning_entry(self, **gate_extra):
         gate = {"kind": "reasoning", "judge_prompt": "judge it " + _PH}
         gate.update(gate_extra)
-        return {"task_id": "t", "target_repo": str(self.tmp), "dispatch_mode": "subagent",
+        return {"id": "t", "repo": str(self.tmp), "mode": "pipeline",
                 "steps": [_step("a", gate=gate), _step("b")]}
 
     def test_rejected_without_opt_in(self):
-        probs = self._check({"entries": [self._reasoning_entry()]})
+        probs = self._check({"jobs": [self._reasoning_entry()]})
         self.assertTrue(any("allow_reasoning_gates" in p for p in probs), probs)
 
     def test_rejected_in_measurement_run(self):
         probs = self._check({"allow_reasoning_gates": True, "measurement": True,
-                             "entries": [self._reasoning_entry()]})
+                             "jobs": [self._reasoning_entry()]})
         self.assertTrue(any("measurement" in p for p in probs), probs)
 
     def test_same_context_judge_is_error(self):
         probs = self._check({"allow_reasoning_gates": True,
-                             "entries": [self._reasoning_entry(same_context=True)]})
+                             "jobs": [self._reasoning_entry(same_context=True)]})
         self.assertTrue(any("same context" in p for p in probs), probs)
 
     def test_missing_judge_is_error(self):
-        e = {"task_id": "t", "target_repo": str(self.tmp), "dispatch_mode": "subagent",
+        e = {"id": "t", "repo": str(self.tmp), "mode": "pipeline",
              "steps": [_step("a", gate={"kind": "reasoning"}), _step("b")]}
-        probs = self._check({"allow_reasoning_gates": True, "entries": [e]})
+        probs = self._check({"allow_reasoning_gates": True, "jobs": [e]})
         self.assertTrue(any("distinct judge" in p for p in probs), probs)
 
     def test_opt_in_clean(self):
         self.assertEqual(self._check({"allow_reasoning_gates": True,
-                                      "entries": [self._reasoning_entry()]}), [])
+                                      "jobs": [self._reasoning_entry()]}), [])
 
 
 class ReasoningGateRuntimeTests(_Base):
     def _reasoning_plan(self):
-        e = {"task_id": "t", "target_repo": "/tmp", "dispatch_mode": "subagent",
+        e = {"id": "t", "repo": "/tmp", "mode": "pipeline",
              "steps": [_step("a", gate={"kind": "reasoning",
                                         "judge_prompt": "judge " + _PH}),
                        _step("b")]}
-        return {"pool_size": 1, "allow_reasoning_gates": True, "entries": [e]}
+        return {"pool_size": 1, "allow_reasoning_gates": True, "jobs": [e]}
 
     def test_judge_dispatched_in_separate_context_and_verdict_applied(self):
         rd = self._init(self._reasoning_plan())

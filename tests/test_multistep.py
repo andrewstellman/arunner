@@ -44,13 +44,14 @@ _PH = "".join("{%s}" % p for p in T._PLACEHOLDERS)
 
 
 def _step(label, **extra):
-    e = {"label": label, "worker_prompt": label + " " + _PH}
+    # bare agent prompt (the engine auto-injects the placeholder preamble)
+    e = {"label": label, "mode": "agent", "prompt": label}
     e.update(extra)
     return e
 
 
 def _ms_entry(tid, nsteps, repo="/tmp/x"):
-    return {"task_id": tid, "target_repo": repo, "dispatch_mode": "subagent",
+    return {"id": tid, "repo": repo, "mode": "pipeline",
             "steps": [_step("step%d" % (i + 1)) for i in range(nsteps)]}
 
 
@@ -84,7 +85,7 @@ class _Base(unittest.TestCase):
 
 class StructureTests(_Base):
     def test_init_records_step_index_count_and_scaffolds_first_step(self):
-        rd = self._init({"entries": [_ms_entry("t1", 3)]})
+        rd = self._init({"jobs": [_ms_entry("t1", 3)]})
         s = self._status(rd)
         r = s["runs"]["run-01"]
         self.assertEqual(r["step_index"], 0)
@@ -96,14 +97,14 @@ class StructureTests(_Base):
         self.assertEqual(mf["step_count"], 3)
 
     def test_table_shows_step_n_of_m(self):
-        rd = self._init({"entries": [_ms_entry("t1", 3)]})
+        rd = self._init({"jobs": [_ms_entry("t1", 3)]})
         out = T.tick(rd)
         self.assertIn("s1/3", out["status_table"])
 
 
 class OrderingTests(_Base):
     def test_three_step_ordering_advances_one_per_terminal(self):
-        rd = self._init({"pool_size": 2, "entries": [_ms_entry("t1", 3)]})
+        rd = self._init({"pool_size": 2, "jobs": [_ms_entry("t1", 3)]})
         out = T.tick(rd)
         d = [x for x in out["dispatch_list"]]
         self.assertEqual(len(d), 1)
@@ -121,7 +122,7 @@ class OrderingTests(_Base):
 
     def test_pool1_second_entry_waits(self):
         rd = self._init({"pool_size": 1,
-                         "entries": [_ms_entry("t1", 3), _ms_entry("t2", 2)]})
+                         "jobs": [_ms_entry("t1", 3), _ms_entry("t2", 2)]})
         out = T.tick(rd)
         self.assertEqual([x["run"] for x in out["dispatch_list"]], ["run-01"])
         # drive run-01 through all 3 steps; run-02 must NOT dispatch until done
@@ -139,7 +140,7 @@ class OrderingTests(_Base):
 
 class ResumeTests(_Base):
     def test_resume_does_not_rerun_completed_steps(self):
-        rd = self._init({"pool_size": 1, "entries": [_ms_entry("t1", 3)]})
+        rd = self._init({"pool_size": 1, "jobs": [_ms_entry("t1", 3)]})
         T.tick(rd)
         self._complete_step(rd, "run-01", 0)
         T.tick(rd)                                  # reap step-01, dispatch step-02
@@ -159,7 +160,7 @@ class ResumeTests(_Base):
         self.assertEqual([x["step"] for x in out["dispatch_list"]], ["step-03"])
 
     def test_step_reap_is_idempotent(self):
-        rd = self._init({"pool_size": 1, "entries": [_ms_entry("t1", 2)]})
+        rd = self._init({"pool_size": 1, "jobs": [_ms_entry("t1", 2)]})
         T.tick(rd)
         self._complete_step(rd, "run-01", 0)
         T.tick(rd)                                  # step-01 reaped (COMPLETED)
@@ -172,7 +173,7 @@ class ResumeTests(_Base):
         self.assertEqual(json.loads(first)["terminal_status"], "COMPLETED")
 
     def test_crash_between_reap_and_dispatch_resumes(self):
-        rd = self._init({"pool_size": 1, "entries": [_ms_entry("t1", 3)]})
+        rd = self._init({"pool_size": 1, "jobs": [_ms_entry("t1", 3)]})
         T.tick(rd)
         self._complete_step(rd, "run-01", 0)
         # Simulate a crash AFTER reap+advance but BEFORE step-02 dispatched:
@@ -191,7 +192,7 @@ class ResumeTests(_Base):
 
 class FailureTests(_Base):
     def test_failed_step_terminals_entry_with_per_step_failure(self):
-        rd = self._init({"pool_size": 1, "entries": [_ms_entry("t1", 3)]})
+        rd = self._init({"pool_size": 1, "jobs": [_ms_entry("t1", 3)]})
         T.tick(rd)
         self._complete_step(rd, "run-01", 0)
         T.tick(rd)                                  # at step-02
@@ -208,7 +209,7 @@ class FailureTests(_Base):
 
 class SummaryTests(_Base):
     def test_summary_lists_per_step_statuses(self):
-        rd = self._init({"pool_size": 1, "entries": [_ms_entry("t1", 2)]})
+        rd = self._init({"pool_size": 1, "jobs": [_ms_entry("t1", 2)]})
         T.tick(rd)
         self._complete_step(rd, "run-01", 0)
         T.tick(rd)
@@ -223,22 +224,27 @@ class SummaryTests(_Base):
 
 
 class CheckTests(_Base):
-    def test_check_rejects_prompt_and_steps_both(self):
-        e = {"task_id": "t1", "target_repo": str(self.tmp),
-             "dispatch_mode": "subagent", "worker_prompt": _PH,
-             "steps": [_step("a")]}
+    def test_check_pipeline_rejects_inline_prompt_key(self):
+        # Re-aimed (was "prompt and steps both"): mode is now the discriminator.
+        # A pipeline job declaring an inline `prompt` is a strict-keys typo error
+        # (prompt is not a permitted key for mode 'pipeline').
+        e = {"id": "t1", "repo": str(self.tmp), "mode": "pipeline",
+             "prompt": _PH, "steps": [_step("a")]}
         pf = self.tmp / "p.json"
-        pf.write_text(json.dumps({"entries": [e]}))
+        pf.write_text(json.dumps({"jobs": [e]}))
         probs = T.check_plan(pf)
-        self.assertTrue(any("exactly one" in p for p in probs), probs)
+        self.assertTrue(any("unknown key 'prompt'" in p for p in probs), probs)
 
     def test_check_step_needs_a_prompt_source(self):
-        e = {"task_id": "t1", "target_repo": str(self.tmp), "dispatch_mode": "subagent",
-             "steps": [{"label": "bare"}]}
+        # Re-aimed: an agent step with neither prompt nor prompt_file is rejected
+        # (preserves the "a step must carry a prompt source" intent).
+        e = {"id": "t1", "repo": str(self.tmp), "mode": "pipeline",
+             "steps": [{"label": "bare", "mode": "agent"}]}
         pf = self.tmp / "p.json"
-        pf.write_text(json.dumps({"entries": [e]}))
+        pf.write_text(json.dumps({"jobs": [e]}))
         probs = T.check_plan(pf)
-        self.assertTrue(any("exactly one prompt source" in p for p in probs), probs)
+        self.assertTrue(any("agent mode needs a prompt or prompt_file" in p
+                            for p in probs), probs)
 
 
 if __name__ == "__main__":

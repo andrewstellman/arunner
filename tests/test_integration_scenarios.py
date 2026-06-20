@@ -53,21 +53,21 @@ class IntegrationScenarioTests(unittest.TestCase):
                                  "scenario %s failed: %s" % (sc.name, failures))
 
     def test_harness_rejects_malformed_plan_via_check(self):
-        # FR-42 dogfood: a scenario whose plan is malformed (bad dispatch_mode)
+        # FR-42 dogfood: a scenario whose plan is malformed (bad job `mode`)
         # must fail loudly at --check on load, not produce a confusing run.
         with tempfile.TemporaryDirectory() as d:
             sc = Path(d) / "bad_scenario"
             sc.mkdir()
             (sc / "scenario.json").write_text(json.dumps({
-                "plan": {"pool_size": 1, "entries": [
-                    {"task_id": "t", "target_repo": "{SCENARIO_DIR}",
-                     "dispatch_mode": "bogus",          # invalid enum
-                     "worker_prompt": "x"}]},
+                "plan": {"pool_size": 1, "jobs": [
+                    {"id": "t", "repo": "{SCENARIO_DIR}",
+                     "mode": "bogus",                   # invalid enum
+                     "prompt": "x"}]},
                 "expected": {}}))
             with self.assertRaises(RuntimeError) as cm:
                 RUNNER.run_scenario(sc, d)
             self.assertIn("--check", str(cm.exception))
-            self.assertIn("dispatch_mode", str(cm.exception))
+            self.assertIn("mode", str(cm.exception))
 
     def test_continuation_detector_discriminates(self):
         # FR-55: the abandonment detector must genuinely FIRE on a real

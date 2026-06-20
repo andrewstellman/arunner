@@ -129,7 +129,7 @@ class AdapterSynthesis(unittest.TestCase):
 
     def test_adapter_synthesizes_all_three(self):              # PIN
         cmd = T._adapter_worker_cmd(
-            {"adapter": "wrap", "command": ["make"]},
+            {"mode": "command", "command": ["make"]},
             {"launch_grace_minutes": 20, "stall_threshold_minutes": 60,
              "keepalive_seconds": 30})
         for flag, val in (("--launch-grace-minutes", "20"),
@@ -140,12 +140,12 @@ class AdapterSynthesis(unittest.TestCase):
 
     def test_entry_override_wins_over_plan(self):
         cmd = T._adapter_worker_cmd(
-            {"adapter": "wrap", "command": ["make"], "keepalive_seconds": 5},
+            {"mode": "command", "command": ["make"], "keepalive_seconds": 5},
             {"keepalive_seconds": 30})
         self.assertEqual(cmd[cmd.index("--keepalive-seconds") + 1], "5")
 
     def test_defaults_when_no_plan(self):
-        cmd = T._adapter_worker_cmd({"adapter": "tail", "log_path": "x"})
+        cmd = T._adapter_worker_cmd({"mode": "log", "log_path": "x"})
         self.assertEqual(cmd[cmd.index("--keepalive-seconds") + 1],
                          str(T.DEFAULT_KEEPALIVE_SECONDS))
         self.assertEqual(cmd[cmd.index("--launch-grace-minutes") + 1],
@@ -160,24 +160,23 @@ class CheckGate(unittest.TestCase):
         return T.check_plan(d)
 
     def _wrap_entry(self):
-        return {"task_id": "a", "target_repo": ".", "dispatch_mode": "shell",
-                "adapter": "wrap", "command": ["make"]}
+        return {"id": "a", "repo": ".", "mode": "command", "command": ["make"]}
 
     def test_check_rejects_keepalive_over_grace(self):         # PIN
         probs = self._check({"launch_grace_minutes": 10, "keepalive_seconds": 700,
-                             "entries": [self._wrap_entry()]})
+                             "jobs": [self._wrap_entry()]})
         self.assertTrue(any("keepalive_seconds" in p and "launch grace" in p
                             for p in probs), probs)
 
     def test_check_accepts_keepalive_within_grace(self):
         self.assertEqual(
             self._check({"launch_grace_minutes": 10, "keepalive_seconds": 30,
-                         "entries": [self._wrap_entry()]}), [])
+                         "jobs": [self._wrap_entry()]}), [])
 
     def test_check_rejects_entry_level_override_over_grace(self):
         e = self._wrap_entry(); e["keepalive_seconds"] = 999
-        probs = self._check({"launch_grace_minutes": 5, "entries": [e]})
-        self.assertTrue(any("entries[0].keepalive_seconds" in p for p in probs), probs)
+        probs = self._check({"launch_grace_minutes": 5, "jobs": [e]})
+        self.assertTrue(any("jobs[0].keepalive_seconds" in p for p in probs), probs)
 
 
 class RealDefaultGracePath(unittest.TestCase):

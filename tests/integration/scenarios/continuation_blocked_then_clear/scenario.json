@@ -1,18 +1,17 @@
 {
   "description": "FR-55 blocked_then_clear: host records a blocker after tick 2 (verdict => HALT:blocked at tick 3), yields citing HALT:blocked (matches), then clears the blocker and resumes to done. Detector silent; the blocker round-trips.",
   "plan": {
-    "schema_version": "1",
+    "schema_version": "2",
     "tick_interval_minutes": 1,
     "pool_size": 1,
     "stall_threshold_minutes": 45,
     "launch_grace_minutes": 10,
-    "entries": [
+    "jobs": [
       {
-        "task_id": "cc-1",
-        "target_repo": "{SCENARIO_DIR}",
-        "dispatch_mode": "shell",
-        "worker_prompt": "stub cc-1",
-        "worker_cmd": [
+        "id": "cc-1",
+        "repo": "{SCENARIO_DIR}",
+        "mode": "shell",
+        "command": [
           "python3",
           "{STUB}",
           "--heartbeat",
@@ -28,11 +27,10 @@
         ]
       },
       {
-        "task_id": "cc-2",
-        "target_repo": "{SCENARIO_DIR}",
-        "dispatch_mode": "shell",
-        "worker_prompt": "stub cc-2",
-        "worker_cmd": [
+        "id": "cc-2",
+        "repo": "{SCENARIO_DIR}",
+        "mode": "shell",
+        "command": [
           "python3",
           "{STUB}",
           "--heartbeat",
@@ -48,11 +46,10 @@
         ]
       },
       {
-        "task_id": "cc-3",
-        "target_repo": "{SCENARIO_DIR}",
-        "dispatch_mode": "shell",
-        "worker_prompt": "stub cc-3",
-        "worker_cmd": [
+        "id": "cc-3",
+        "repo": "{SCENARIO_DIR}",
+        "mode": "shell",
+        "command": [
           "python3",
           "{STUB}",
           "--heartbeat",

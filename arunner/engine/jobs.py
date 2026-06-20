@@ -1,28 +1,22 @@
 #!/usr/bin/env python3
-"""arunner jobs  -  the `jobs:` shorthand expander (FR-43).
+"""arunner jobs  -  the plan defaults + placeholder filler (FR-43).
 
-A higher-level, ergonomic plan form the skill/TOOLKIT expands into the full
-placeholder-laden ``plan.json`` the engine consumes. The low-level plan schema
-stays CANONICAL; this is a pure convenience layer on top -- the engine only
-ever sees the expanded plan. The expander injects the required placeholders
-into each ``worker_prompt`` so the expanded plan passes ``tick.py --check``
-(FR-42); adapter jobs route through the FR-41 ``adapter`` selector (the engine
-synthesizes their worker_cmd, so they need no placeholder plumbing).
+ONE format: a plan is a single ``jobs`` list whose jobs carry friendly,
+mode-discriminated keys (``id``/``repo``/``mode`` + the per-mode field). There
+is no longer a shorthand/canonical dialect split, so this module no longer
+RENAMES anything -- it is a thin convenience layer that:
 
-Shorthand (``jobs:`` list); each job is ONE of:
-  * an agent job   {repo, prompt, [agent:"subagent"], [id]}
-                   -> a subagent entry whose worker_prompt carries the prompt
-                      under the injected placeholder header.
-  * an adapter job {repo, adapter:"wrap", command:[...], [id]}
-                   {repo, adapter:"tail", log_path, [success_regex/failure_regex/
-                      sentinel_file/pid/command], [id]}
-                   -> a shell `adapter` entry (FR-41 selector wires the rest).
-Top-level knobs (pool_size, tick_interval_minutes, ...) pass through unchanged.
+  * merges a plan-level ``defaults`` map UNDER each job (the job's own key
+    wins), and
+  * injects the reserved-placeholder preamble into each ``agent`` job's
+    ``prompt`` so a saved/expanded plan is concrete.
 
-An already-canonical doc (has ``entries``, no ``jobs``) passes through
-unchanged, so a tool can expand-then-check uniformly.
+Both are IDEMPOTENT and OPTIONAL: the engine (tick.py) merges the same defaults
+at ``--init`` and auto-injects the same preamble at dispatch, so a bare source
+plan and an expanded one run identically. ``expand_jobs`` exists for the session
+bundle (FR-52.4) and for tools that want the concrete plan on disk.
 
-Stdlib only. Usage: ``jobs.py expand <shorthand.json>`` prints the plan JSON.
+Stdlib only. Usage: ``jobs.py expand <plan.json>`` prints the filled plan JSON.
 """
 from __future__ import annotations
 
@@ -30,63 +24,57 @@ import json
 import sys
 from pathlib import Path
 
-# The placeholder header injected into every agent (subagent) prompt. Carries
-# the FULL engine placeholder block so the expanded prompt passes --check; the
-# engine substitutes these with absolute paths at dispatch (FR-21a, no
-# model-transcribed paths). Keep in lockstep with tick._PLACEHOLDERS.
+# The placeholder preamble injected into every agent prompt. Carries the FULL
+# engine placeholder block; the engine substitutes these with absolute paths at
+# dispatch (FR-21a, no model-transcribed paths). Keep in lockstep with
+# tick._PLACEHOLDERS / tick._PLACEHOLDER_HEADER.
 _PLACEHOLDER_KEYS = ("HEARTBEAT_PATH", "TASK_ID", "RUN_DIR", "TARGET_REPO",
                      "HARNESS_BIN")
 _PLACEHOLDER_HEADER = "".join("%s={%s}\n" % (k, k) for k in _PLACEHOLDER_KEYS) + "\n"
 
-_TOPLEVEL_PASSTHROUGH = ("schema_version", "tick_interval_minutes", "pool_size",
-                         "stall_threshold_minutes", "launch_grace_minutes",
-                         "idle_tick_multiplier")
-_ADAPTER_FIELDS = ("command", "log_path", "success_regex", "failure_regex",
-                   "sentinel_file", "pid")
+
+def _inject_preamble(prompt: str) -> str:
+    """Prepend the placeholder preamble unless the prompt already carries
+    {HEARTBEAT_PATH} (idempotent — never doubles a header)."""
+    if "{HEARTBEAT_PATH}" in (prompt or ""):
+        return prompt or ""
+    return _PLACEHOLDER_HEADER + (prompt or "")
 
 
-def _expand_job(i: int, job: dict) -> dict:
+def _fill_job(job: dict, defaults: dict) -> dict:
     if not isinstance(job, dict):
-        return {"task_id": "job-%02d" % i, "target_repo": "",
-                "dispatch_mode": "subagent", "worker_prompt": _PLACEHOLDER_HEADER}
-    entry = {"task_id": str(job.get("id") or "job-%02d" % i),
-             "target_repo": str(job.get("repo", ""))}
-    adapter = job.get("adapter")
-    if adapter:
-        entry["dispatch_mode"] = "shell"
-        entry["adapter"] = adapter
-        for k in _ADAPTER_FIELDS:
-            if k in job:
-                entry[k] = job[k]
-    else:
-        entry["dispatch_mode"] = "subagent"
-        entry["worker_prompt"] = _PLACEHOLDER_HEADER + str(job.get("prompt", ""))
-    return entry
+        return job
+    merged = dict(defaults) if defaults else {}
+    merged.update(job)
+    if merged.get("mode") == "agent" and isinstance(merged.get("prompt"), str):
+        merged["prompt"] = _inject_preamble(merged["prompt"])
+    return merged
 
 
 def expand_jobs(doc: dict) -> dict:
-    """Expand a ``jobs:`` shorthand doc into a canonical plan. An already-
-    canonical doc (no ``jobs``) is returned unchanged."""
+    """Fill ``defaults`` into each job + inject the agent placeholder preamble.
+    A doc without ``jobs`` is returned unchanged (so a tool can fill-then-check
+    uniformly)."""
     if not isinstance(doc, dict) or "jobs" not in doc:
         return doc
-    plan = {k: doc[k] for k in _TOPLEVEL_PASSTHROUGH if k in doc}
-    jobs = doc.get("jobs") or []
-    plan["entries"] = [_expand_job(i, job) for i, job in enumerate(jobs, start=1)]
+    defaults = doc.get("defaults") if isinstance(doc.get("defaults"), dict) else {}
+    plan = {k: v for k, v in doc.items() if k != "defaults"}
+    plan["jobs"] = [_fill_job(j, defaults) for j in (doc.get("jobs") or [])]
     return plan
 
 
 def session_bundle(doc: dict) -> dict:
-    """FR-52.4 ``my_run.json``: one file carrying the shorthand SOURCE (``jobs``
-    + top-level knobs) AND the expanded canonical ``plan``, so a saved session
-    reruns faithfully (run the ``plan``) yet stays editable (the ``jobs``)."""
+    """FR-52.4 ``my_run.json``: one file carrying the SOURCE (``jobs`` + knobs +
+    optional ``defaults``) AND the filled ``plan``, so a saved session reruns
+    faithfully (run the ``plan``) yet stays editable (the source)."""
     bundle = {k: v for k, v in doc.items() if k != "plan"}
     bundle["plan"] = expand_jobs(doc)
     return bundle
 
 
 def bundle_drifted(bundle: dict) -> bool:
-    """True if re-expanding a my_run.json bundle's shorthand no longer matches
-    its saved ``plan`` (a hand-edit-drift signal -- warn, don't block)."""
+    """True if re-filling a my_run.json bundle's source no longer matches its
+    saved ``plan`` (a hand-edit-drift signal -- warn, don't block)."""
     src = {k: v for k, v in bundle.items() if k != "plan"}
     return expand_jobs(src) != bundle.get("plan")
 
@@ -108,19 +96,19 @@ def main(argv=None) -> int:
         try:
             doc = json.loads(Path(args[1]).read_text(encoding="utf-8"))
         except (OSError, ValueError) as exc:
-            print("jobs: cannot read shorthand %s (%s)" % (args[1], exc),
+            print("jobs: cannot read plan %s (%s)" % (args[1], exc),
                   file=sys.stderr)
             return 2
-        if save:                              # FR-52.4: persist jobs + plan
+        if save:                              # FR-52.4: persist source + plan
             _write_json(session_bundle(doc), save)
             print(save)
-        elif out:                             # FR-52.4: write the expanded plan
+        elif out:                             # FR-52.4: write the filled plan
             _write_json(expand_jobs(doc), out)
             print(out)
         else:
             print(json.dumps(expand_jobs(doc), indent=2))
         return 0
-    print("usage: jobs.py expand <shorthand.json> [--out <plan>] [--save <my_run.json>]",
+    print("usage: jobs.py expand <plan.json> [--out <plan>] [--save <my_run.json>]",
           file=sys.stderr)
     return 64
 

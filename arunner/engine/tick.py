@@ -70,6 +70,20 @@ _TERMINAL_HB = ("COMPLETED", "FAILED", "ABANDONED")
 # killed run-02 in 20260612T005833Z (username hallucinated on transcription).
 _PLACEHOLDERS = ("HEARTBEAT_PATH", "TASK_ID", "RUN_DIR", "TARGET_REPO",
                  "HARNESS_BIN")
+# The placeholder preamble the engine AUTO-INJECTS into every `agent` prompt
+# (job + pipeline step) so authors never hand-type it (settled decision 3 /
+# FR-21a). The TOKENS stay {HEARTBEAT_PATH} etc.; the engine substitutes the
+# absolute paths at dispatch. Injected only when the prompt does not already
+# carry {HEARTBEAT_PATH} (so a hand-written header is never doubled).
+_PLACEHOLDER_HEADER = "".join("%s={%s}\n" % (k, k) for k in _PLACEHOLDERS) + "\n"
+
+
+def _inject_preamble(prompt: str) -> str:
+    """Prepend the reserved-placeholder preamble to an `agent` prompt unless it
+    already carries {HEARTBEAT_PATH} (idempotent — never doubles a header)."""
+    if "{HEARTBEAT_PATH}" in (prompt or ""):
+        return prompt or ""
+    return _PLACEHOLDER_HEADER + (prompt or "")
 # v1.5.9 Phase 2B: shell dispatch adds {PROMPT_FILE} (the per-job prompt
 # written to queue/job-NNNNN.prompt.txt for quoting/arg-length safety).
 _SHELL_PLACEHOLDERS = _PLACEHOLDERS + ("PROMPT_FILE",)
@@ -206,32 +220,78 @@ def _cfg(plan: dict, key: str, default):
     return val if isinstance(val, type(default)) else default
 
 
+# --- the one `mode` discriminator -------------------------------------------
+# A job/step declares ONE friendly `mode`; the engine maps it onto its existing
+# dispatch machinery. agent -> in-session subagent (auto-injected placeholder
+# preamble); command -> shell via the synthesized `wrap` heartbeat helper;
+# log -> shell via the synthesized `tail` helper; shell -> shell with the raw
+# `command` argv (operator wires the heartbeat); pipeline -> ordered steps.
+_AGENT_MODES = ("agent",)
+_SHELL_MODES = ("command", "log", "shell")     # dispatch as dispatch_mode:"shell"
+_JOB_MODES = ("agent", "command", "log", "pipeline", "shell")
+_STEP_MODES = ("agent", "command", "log", "shell")
+# command -> the FR-40/41 `wrap` adapter; log -> `tail`. shell/agent synthesize
+# no adapter helper (shell is raw argv; agent is a subagent prompt).
+_MODE_ADAPTER = {"command": "wrap", "log": "tail"}
+
+
+def _dispatch_mode_of(entry) -> str:
+    """The RUNTIME dispatch_mode (subagent | shell) for a job/step, derived from
+    its friendly ``mode``. Recorded in the manifest/lock/record (A2A vocabulary)."""
+    return "shell" if (isinstance(entry, dict)
+                       and entry.get("mode") in _SHELL_MODES) else "subagent"
+
+
+def _apply_defaults(job: dict, defaults: dict) -> dict:
+    """Shallow-merge a plan-level ``defaults`` map UNDER one job (the job's own
+    key always wins). Returns the job unchanged when there is nothing to merge."""
+    if not (isinstance(defaults, dict) and defaults and isinstance(job, dict)):
+        return job
+    merged = dict(defaults)
+    merged.update(job)
+    return merged
+
+
+def _merge_defaults(plan: dict) -> list:
+    """The plan's jobs with ``defaults`` merged under each (job key wins). Used by
+    --check and --init so the effective job (what the engine reads) is validated
+    and dispatched. Non-dict jobs pass through untouched."""
+    defaults = plan.get("defaults") if isinstance(plan.get("defaults"), dict) else {}
+    jobs = plan.get("jobs") or []
+    return [_apply_defaults(j, defaults) if isinstance(j, dict) else j for j in jobs]
+
+
 # --- init -------------------------------------------------------------------
 
 def _scaffold_run(run_dir: Path, run_name: str, job_id: str, entry: dict) -> dict:
     """Scaffold ONE run-NN (heartbeat file, manifest, queue claim token) and
     return its ``queued`` runs-record. The single source of truth for the
     per-run on-disk shape, shared by ``init_run`` (the initial batch) and
-    ``_absorb_incoming`` (FR-57 live adds) so they can never drift."""
+    ``_absorb_incoming`` (FR-57 live adds) so they can never drift.
+
+    The job is the friendly mode-discriminated shape (``id``/``repo``/``mode``);
+    the runtime RECORD keeps the A2A identity vocabulary (``task_id``/
+    ``target_repo``/``dispatch_mode``) — the {TASK_ID}/{TARGET_REPO} placeholder
+    tokens stay, so this is the one plan-vocab -> runtime-vocab seam."""
     rd = run_dir / run_name
     rd.mkdir(exist_ok=True)
     (rd / "heartbeat.ndjson").touch()
     manifest = {
-        "task_id": entry.get("task_id"),
-        "target_repo": entry.get("target_repo"),
-        "dispatch_mode": entry.get("dispatch_mode", "subagent"),
+        "task_id": entry.get("id"),
+        "target_repo": entry.get("repo"),
+        "dispatch_mode": _dispatch_mode_of(entry),
         "run": run_name,
         "job_id": job_id,
     }
-    # FR-20: a plan entry MAY point the harness at a heartbeat file the
+    # FR-20: a plan job MAY point the harness at a heartbeat file the
     # job already writes (absolute). Recorded here so _heartbeat_path
     # watches it instead of the run-dir default.
     if entry.get("heartbeat_path"):
         manifest["heartbeat_path"] = entry["heartbeat_path"]
     record = {
-        "task_id": entry.get("task_id"),
+        "task_id": entry.get("id"),
         "job_id": job_id,
-        "target_repo": entry.get("target_repo"),
+        "target_repo": entry.get("repo"),
         "state": "queued",
         "last_hb_status": None,
         "claimed_at": None,
@@ -256,7 +316,7 @@ def _scaffold_run(run_dir: Path, run_name: str, job_id: str, entry: dict) -> dic
 def _absorb_incoming(run_dir: Path) -> int:
     """FR-57 stage-and-absorb: at the START of a tick (under the ``.tick.lock``
     the caller already holds) append any entries staged in ``<run-dir>/incoming/``
-    to ``plan.json["entries"]``, scaffold each new ``run-NN`` + a ``queued``
+    to ``plan.json["jobs"]``, scaffold each new ``run-NN`` + a ``queued``
     record in ``harness_status.json["runs"]`` (mirroring ``init_run``), then
     retire the absorbed file. Race-free by construction: ``add`` only ever
     writes ``incoming/`` -- never the live files a concurrent tick reads/writes.
@@ -276,7 +336,8 @@ def _absorb_incoming(run_dir: Path) -> int:
         return 0
     plan = json.loads((run_dir / "plan.json").read_text(encoding="utf-8"))
     status = json.loads((run_dir / "harness_status.json").read_text(encoding="utf-8"))
-    entries = plan.setdefault("entries", [])
+    jobs = plan.setdefault("jobs", [])
+    plan_defaults = plan.get("defaults") if isinstance(plan.get("defaults"), dict) else {}
     runs = status["runs"]
     added = 0
     for sp in staged:
@@ -286,18 +347,19 @@ def _absorb_incoming(run_dir: Path) -> int:
             _log(run_dir, "absorb: skipping malformed incoming %s" % sp.name)
             sp.unlink()
             continue
-        new_entries = (payload.get("entries") if isinstance(payload, dict)
-                       else payload)
+        new_jobs = (payload.get("jobs") if isinstance(payload, dict)
+                    else payload)
         pool = payload.get("pool_size") if isinstance(payload, dict) else None
-        for entry in (new_entries or []):
+        for entry in (new_jobs or []):
             if not isinstance(entry, dict):
                 continue
-            idx = len(entries) + 1                      # APPEND-ONLY, positional
+            idx = len(jobs) + 1                         # APPEND-ONLY, positional
             run_name = "run-%02d" % idx
             job_id = "job-%05d" % idx
-            if not entry.get("task_id"):
-                entry = dict(entry, task_id="added-%02d" % idx)   # mint if absent
-            entries.append(entry)                        # placeholders UNRESOLVED
+            entry = _apply_defaults(entry, plan_defaults)
+            if not entry.get("id"):
+                entry = dict(entry, id="added-%02d" % idx)        # mint if absent
+            jobs.append(entry)                           # placeholders UNRESOLVED
             runs[run_name] = _scaffold_run(run_dir, run_name, job_id, entry)
             added += 1
         if pool:
@@ -309,8 +371,8 @@ def _absorb_incoming(run_dir: Path) -> int:
         # is recomputed by the tick that called us.
         _write_json(run_dir / "plan.json", plan)
         _write_json(run_dir / "harness_status.json", status)
-        _log(run_dir, "absorb: +%d run(s) from incoming/ (now %d entr%s)"
-             % (added, len(entries), "y" if len(entries) == 1 else "ies"))
+        _log(run_dir, "absorb: +%d run(s) from incoming/ (now %d job%s)"
+             % (added, len(jobs), "" if len(jobs) == 1 else "s"))
     return added
 
 
@@ -378,15 +440,15 @@ def _check_message(msg) -> list:
     if not isinstance(args, dict):
         return p + ["'args' must be an object"]
     if verb == "enqueue":
-        if not (isinstance(args.get("entries"), list) and args["entries"]):
-            p.append("enqueue requires non-empty args.entries[]")
+        if not (isinstance(args.get("jobs"), list) and args["jobs"]):
+            p.append("enqueue requires non-empty args.jobs[]")
     elif verb == "run-batch":
-        if not (args.get("batch") or (isinstance(args.get("entries"), list)
-                                      and args["entries"])):
-            p.append("run-batch requires args.batch (name) or args.entries[]")
+        if not (args.get("batch") or (isinstance(args.get("jobs"), list)
+                                      and args["jobs"])):
+            p.append("run-batch requires args.batch (name) or args.jobs[]")
     elif verb == "dispatch-job":
-        if not (isinstance(args.get("worker_prompt"), str) and args["worker_prompt"]):
-            p.append("dispatch-job requires args.worker_prompt (non-empty string)")
+        if not (isinstance(args.get("prompt"), str) and args["prompt"]):
+            p.append("dispatch-job requires args.prompt (non-empty string)")
     elif verb == "control":
         op = args.get("op")
         if op not in _CONTROL_OPS:
@@ -399,26 +461,26 @@ def _check_message(msg) -> list:
 
 
 def _msg_entries(run_dir: Path, msg: dict) -> list:
-    """The plan entries a job-staging verb contributes (placeholders UNRESOLVED)."""
+    """The plan jobs a job-staging verb contributes (placeholders UNRESOLVED)."""
     verb = msg["verb"]
     args = msg.get("args") or {}
     if verb == "enqueue":
-        return list(args.get("entries") or [])
+        return list(args.get("jobs") or [])
     if verb == "dispatch-job":
-        e = {"target_repo": args.get("target_repo", "."),
-             "dispatch_mode": "subagent", "worker_prompt": args["worker_prompt"]}
-        if args.get("task_id"):
-            e["task_id"] = args["task_id"]
+        e = {"repo": args.get("repo", "."),
+             "mode": "agent", "prompt": args["prompt"]}
+        if args.get("id"):
+            e["id"] = args["id"]
         return [e]
     if verb == "run-batch":
-        if isinstance(args.get("entries"), list):
-            return list(args["entries"])
+        if isinstance(args.get("jobs"), list):
+            return list(args["jobs"])
         bf = run_dir / "batches" / (str(args.get("batch")) + ".json")
         try:
             doc = json.loads(bf.read_text(encoding="utf-8"))
         except (OSError, ValueError):
             return []
-        return list(doc.get("entries") or [])
+        return list(doc.get("jobs") or [])
     return []
 
 
@@ -428,34 +490,38 @@ def _process_message(run_dir, msg, plan, status):
     verb = msg["verb"]
     args = msg.get("args") or {}
     if verb in ("enqueue", "dispatch-job", "run-batch"):
-        entries = _msg_entries(run_dir, msg)
-        if not entries:
-            return "rejected", "no entries to stage", [], []
-        # --check the synthesized entries against the live plan's knobs BEFORE
+        jobs = _msg_entries(run_dir, msg)
+        if not jobs:
+            return "rejected", "no jobs to stage", [], []
+        plan_defaults = (plan.get("defaults")
+                         if isinstance(plan.get("defaults"), dict) else {})
+        jobs = [_apply_defaults(e, plan_defaults) if isinstance(e, dict) else e
+                for e in jobs]
+        # --check the synthesized jobs against the live plan's knobs BEFORE
         # they touch the work table (FR-42); a bad spec never lands.
         probe = {k: plan[k] for k in _PLAN_INT_KEYS if k in plan}
-        probe["entries"] = entries
-        base = len(plan.get("entries") or [])
-        for j, e in enumerate(entries):
-            if isinstance(e, dict) and not e.get("task_id"):
-                e["task_id"] = "msg-%02d" % (base + j + 1)
+        probe["jobs"] = jobs
+        base = len(plan.get("jobs") or [])
+        for j, e in enumerate(jobs):
+            if isinstance(e, dict) and not e.get("id"):
+                e["id"] = "msg-%02d" % (base + j + 1)
         import tempfile as _tmp
         tp = Path(_tmp.mkdtemp()) / "probe.json"
         tp.write_text(json.dumps(probe), encoding="utf-8")
         probs = check_plan(tp)
         if probs:
             return "rejected", "; ".join(probs), [], []
-        pentries = plan.setdefault("entries", [])
+        pjobs = plan.setdefault("jobs", [])
         runs = status["runs"]
         spawned, task_ids = [], []
-        for e in entries:
-            idx = len(pentries) + 1                    # APPEND-ONLY, positional
+        for e in jobs:
+            idx = len(pjobs) + 1                       # APPEND-ONLY, positional
             run_name = "run-%02d" % idx
             job_id = "job-%05d" % idx
-            pentries.append(e)                          # placeholders UNRESOLVED
+            pjobs.append(e)                             # placeholders UNRESOLVED
             runs[run_name] = _scaffold_run(run_dir, run_name, job_id, e)
             spawned.append(run_name)
-            task_ids.append(e.get("task_id"))
+            task_ids.append(e.get("id"))
         return "applied", None, task_ids, spawned
     if verb == "control":
         op = args["op"]
@@ -578,9 +644,13 @@ def _emit_ready_results(run_dir: Path, runs: dict) -> None:
 
 def init_run(plan_path: Path) -> Path:
     plan = json.loads(plan_path.read_text(encoding="utf-8"))
-    entries = plan.get("entries") or []
-    if not entries:
-        raise ValueError(f"plan {plan_path} has no entries[]")
+    # Bake `defaults` into each job so the persisted plan.json (read every tick)
+    # is the EFFECTIVE shape; the engine never re-merges downstream.
+    jobs = _merge_defaults(plan)
+    if not jobs:
+        raise ValueError(f"plan {plan_path} has no jobs[]")
+    plan["jobs"] = jobs
+    plan.pop("defaults", None)                      # consumed into the jobs
     stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     # Base dir is <repo>/harness_runs by default; ARUNNER_RUNS_DIR
     # overrides it (tests point this at a tmp dir to stay hermetic).
@@ -591,15 +661,15 @@ def init_run(plan_path: Path) -> Path:
         (run_dir / sub).mkdir(parents=True)
     runs: dict[str, dict] = {}
     plan_dir = plan_path.resolve().parent          # FR-61: prompt-file base dir
-    for i, entry in enumerate(entries, start=1):
+    for i, entry in enumerate(jobs, start=1):
         run_name = "run-%02d" % i
         job_id = "job-%05d" % i
-        # FR-61/62: snapshot any prompt-from-file (entry-level + per-step) into
+        # FR-61/62: snapshot any prompt-from-file (job-level + per-step) into
         # the run-dir so the run is a self-sufficient record (NFR-9); persist the
-        # snapshot back into plan.json's entry so every downstream path sees a
+        # snapshot back into plan.json's job so every downstream path sees a
         # normal inline prompt.
         entry = _snapshot_entry_and_steps(entry, plan_dir, run_dir / run_name)
-        entries[i - 1] = entry
+        jobs[i - 1] = entry
         runs[run_name] = _scaffold_run(run_dir, run_name, job_id, entry)
     _write_json(run_dir / "plan.json", plan)
     _write_json(run_dir / "harness_status.json", {
@@ -661,10 +731,9 @@ def _scaffold_step(run_dir: Path, name: str, m: int, entry: dict, step: dict) ->
     mf = sd / "manifest.json"
     if not mf.is_file():
         _write_json(mf, {
-            "task_id": entry.get("task_id"),
-            "target_repo": step.get("target_repo") or entry.get("target_repo"),
-            "dispatch_mode": ("shell" if step.get("adapter") or step.get("worker_cmd")
-                              else step.get("dispatch_mode", "subagent")),
+            "task_id": entry.get("id"),
+            "target_repo": step.get("repo") or entry.get("repo"),
+            "dispatch_mode": _dispatch_mode_of(step),
             "run": name,
             "job_id": "%s-%s" % (entry_job_of(name), _step_name(m)),
             "step_index": m,
@@ -855,27 +924,27 @@ def _snapshot_prompt(entry: dict, base_dir: Path, snap_path: Path) -> dict:
     """FR-61: if ``entry`` sources its prompt from a file, read it (resolved
     relative to ``base_dir``), snapshot the bytes to ``snap_path`` in the
     run-dir (NFR-9 self-sufficient record -- mutating the source after --init
-    never changes the run), and return a NEW entry with ``worker_prompt`` set to
-    the snapshot and ``worker_prompt_file`` removed, so every downstream path
+    never changes the run), and return a NEW entry with ``prompt`` set to
+    the snapshot and ``prompt_file`` removed, so every downstream path
     (dispatch, --check re-probe) sees a normal inline prompt. A non-file entry is
     returned unchanged. A read error raises (the caller surfaces it)."""
-    wpf = entry.get("worker_prompt_file")
+    wpf = entry.get("prompt_file")
     if not wpf:
         return entry
     content = _resolve_prompt_file(wpf, base_dir).read_text(encoding="utf-8")
     snap_path.parent.mkdir(parents=True, exist_ok=True)
     snap_path.write_text(content, encoding="utf-8")
     new = dict(entry)
-    new["worker_prompt"] = content
-    new.pop("worker_prompt_file", None)
+    new["prompt"] = content
+    new.pop("prompt_file", None)
     return new
 
 
 def _snapshot_entry_and_steps(entry: dict, base_dir: Path, rd: Path) -> dict:
-    """FR-61/62: snapshot an entry's prompt-from-file AND each of its steps'
-    prompt-from-file into the run-dir. Returns a new entry with inline
-    ``worker_prompt`` filled and ``worker_prompt_file`` removed at both levels.
-    A single-prompt entry snapshots to ``run-NN/prompt.snapshot.md``; step MM
+    """FR-61/62: snapshot a job's prompt-from-file AND each of its steps'
+    prompt-from-file into the run-dir. Returns a new job with inline
+    ``prompt`` filled and ``prompt_file`` removed at both levels.
+    A single-prompt job snapshots to ``run-NN/prompt.snapshot.md``; step MM
     snapshots to ``run-NN/steps/step-MM/prompt.snapshot.md``."""
     entry = _snapshot_prompt(entry, base_dir, rd / "prompt.snapshot.md")
     steps = entry.get("steps")
@@ -902,20 +971,6 @@ def _snapshot_entry_and_steps(entry: dict, base_dir: Path, rd: Path) -> dict:
         entry = dict(entry)
         entry["steps"] = new_steps
     return entry
-
-
-def _dispatch_prompt(entry: dict, run_dir: Path, run_name: str) -> str:
-    values = {
-        "HEARTBEAT_PATH": str(_heartbeat_path(run_dir, run_name)),
-        "TASK_ID": str(entry.get("task_id", "")),
-        "RUN_DIR": str(run_dir / run_name),
-        "TARGET_REPO": str(entry.get("target_repo", "")),
-        "HARNESS_BIN": _HARNESS_BIN,
-    }
-    prompt = entry.get("worker_prompt", "")
-    for key in _PLACEHOLDERS:
-        prompt = prompt.replace("{%s}" % key, values[key])
-    return prompt
 
 
 def _move_to_results(run_dir: Path, run: dict, terminal_status: str,
@@ -1453,7 +1508,7 @@ def tick(run_dir: Path) -> dict:
                       DEFAULT_LAUNCH_GRACE_MINUTES) * 60
     idle_mult = _cfg(plan, "idle_tick_multiplier", DEFAULT_IDLE_TICK_MULTIPLIER)
     entries = {"run-%02d" % i: e
-               for i, e in enumerate(plan.get("entries") or [], start=1)}
+               for i, e in enumerate(plan.get("jobs") or [], start=1)}
     now = _now()
 
     stop = (run_dir / "STOP").exists()
@@ -1693,9 +1748,9 @@ def _gate_values(run_dir, name, m, step, entry):
     sd = _step_dir(run_dir, name, m)
     return {
         "HEARTBEAT_PATH": str(_step_hb(run_dir, name, m)),
-        "TASK_ID": str(entry.get("task_id", "")),
+        "TASK_ID": str(entry.get("id", "")),
         "RUN_DIR": str(sd),
-        "TARGET_REPO": str(step.get("target_repo") or entry.get("target_repo", "")),
+        "TARGET_REPO": str(step.get("repo") or entry.get("repo", "")),
         "HARNESS_BIN": _HARNESS_BIN,
     }
 
@@ -1878,9 +1933,9 @@ def _dispatch_judge(run_dir, name, r, entry, now, plan) -> dict:
         hbp.touch()
     values = {
         "HEARTBEAT_PATH": str(_judge_hb(run_dir, name, m)),
-        "TASK_ID": "%s-%s-gate" % (entry.get("task_id", ""), _step_name(m)),
+        "TASK_ID": "%s-%s-gate" % (entry.get("id", ""), _step_name(m)),
         "RUN_DIR": str(jd),
-        "TARGET_REPO": str(step.get("target_repo") or entry.get("target_repo", "")),
+        "TARGET_REPO": str(step.get("repo") or entry.get("repo", "")),
         "HARNESS_BIN": _HARNESS_BIN,
         "STEP_DIR": str(_step_dir(run_dir, name, m)),   # the judged artifacts
     }
@@ -2115,16 +2170,15 @@ def _advance_multistep(run_dir, name, r, entry, now, stall_secs, grace_secs,
                 r["state"] = "running"
 
 
-_VALID_ADAPTERS = ("wrap", "tail")
-
-
 def _adapter_worker_cmd(entry: dict, plan: dict = None):
-    """FR-41 selector: synthesize the shell worker_cmd for an entry that
-    declares ``adapter: "wrap"|"tail"`` — so the operator declares intent in
-    ONE place (the command for wrap, or the log path + optional markers for
-    tail) and never hand-wires the heartbeat.py invocation. Returns a token
-    list (with placeholders the dispatch resolver fills), or None when no
-    adapter is declared.
+    """Synthesize the shell worker_cmd for a ``command``/``log`` mode job/step —
+    so the operator declares intent in ONE place (the ``command`` for `command`
+    mode, or the ``log_path`` + optional markers for `log` mode) and never
+    hand-wires the heartbeat.py invocation. `command` mode -> the `wrap` helper
+    (run+watch, doneness = exit code); `log` mode -> the `tail` helper (watch a
+    log a job writes, optionally launching it). Returns a token list (with
+    placeholders the dispatch resolver fills), or None for `agent`/`shell` (a
+    subagent prompt / a raw operator-wired argv — nothing to synthesize).
 
     FR-58a: synthesize ``--launch-grace-minutes`` / ``--stall-threshold-minutes``
     / ``--keepalive-seconds`` from the entry (override) or the plan, so all three
@@ -2132,7 +2186,7 @@ def _adapter_worker_cmd(entry: dict, plan: dict = None):
     fell back to hardcoded 10/45 and a ~10-min keepalive, making the plan's
     grace/stall inert for adapter jobs and the FR-56 activity patterns never fire
     on a normal-length job. (Entry-level wins over plan-level wins over default.)"""
-    adapter = entry.get("adapter")
+    adapter = _MODE_ADAPTER.get(entry.get("mode"))
     if not adapter:
         return None
     plan = plan or {}
@@ -2195,14 +2249,13 @@ def _dispatch_step(run_dir, name, r, entry, now, plan) -> dict:
     step = entry["steps"][m]
     _scaffold_step(run_dir, name, m, entry, step)        # idempotent
     sd = _step_dir(run_dir, name, m)
-    adapter_cmd = _adapter_worker_cmd(step, plan)
-    mode = ("shell" if adapter_cmd is not None
-            else ("shell" if step.get("worker_cmd") else step.get("dispatch_mode", "subagent")))
+    adapter_cmd = _adapter_worker_cmd(step, plan)        # command/log modes
+    mode = _dispatch_mode_of(step)                       # subagent | shell
     values = {
         "HEARTBEAT_PATH": str(_step_hb(run_dir, name, m)),
-        "TASK_ID": str(entry.get("task_id", "")),
+        "TASK_ID": str(entry.get("id", "")),
         "RUN_DIR": str(sd),
-        "TARGET_REPO": str(step.get("target_repo") or entry.get("target_repo", "")),
+        "TARGET_REPO": str(step.get("repo") or entry.get("repo", "")),
         "HARNESS_BIN": _HARNESS_BIN,
     }
     # FR-61/64: plan < entry < step vars < behavior-flags recorded by a prior gate.
@@ -2210,7 +2263,11 @@ def _dispatch_step(run_dir, name, r, entry, now, plan) -> dict:
     for vsrc in (plan.get("vars"), entry.get("vars"), step.get("vars"), r.get("flags")):
         if isinstance(vsrc, dict):
             vmap.update(vsrc)
-    raw = _apply_vars(step.get("worker_prompt", ""), vmap)
+    raw = _apply_vars(step.get("prompt", ""), vmap)
+    # agent steps get the auto-injected placeholder preamble; shell-dispatch
+    # steps (command/log/shell) carry no prompt (their {PROMPT_FILE} is empty).
+    if step.get("mode") == "agent":
+        raw = _inject_preamble(raw)
     prompt = _resolve_template(raw, values)
     r["state"] = "claimed"
     r["claimed_at"] = now
@@ -2225,7 +2282,7 @@ def _dispatch_step(run_dir, name, r, entry, now, plan) -> dict:
                                 "dispatch_mode": mode, "pid": None})
         sh_values = dict(values, PROMPT_FILE=str(prompt_file), LOCK_FILE=str(lock_file))
         cmd_template = (adapter_cmd if adapter_cmd is not None
-                        else (step.get("worker_cmd") or []))
+                        else (step.get("command") or []))
         worker_cmd = [_resolve_template(tok, sh_values) for tok in cmd_template]
         _log(run_dir, "%s: dispatched %s (claimed, shell)" % (name, _step_name(m)))
         return {"run": name, "step": _step_name(m), "task_id": r["task_id"],
@@ -2274,13 +2331,13 @@ def _dispatch(run_dir, runs, entries, pool_size, now, plan=None) -> list[dict]:
             if fresh:
                 inflight += 1
             continue
-        adapter_cmd = _adapter_worker_cmd(entry, plan)   # FR-41/58a: synthesized if adapter set
-        mode = "shell" if adapter_cmd is not None else entry.get("dispatch_mode", "subagent")
+        adapter_cmd = _adapter_worker_cmd(entry, plan)   # command/log: synthesized heartbeat wrapper
+        mode = _dispatch_mode_of(entry)                  # subagent | shell
         values = {
             "HEARTBEAT_PATH": str(_heartbeat_path(run_dir, name)),
-            "TASK_ID": str(entry.get("task_id", "")),
+            "TASK_ID": str(entry.get("id", "")),
             "RUN_DIR": str(run_dir / name),
-            "TARGET_REPO": str(entry.get("target_repo", "")),
+            "TARGET_REPO": str(entry.get("repo", "")),
             "HARNESS_BIN": _HARNESS_BIN,
         }
         src = run_dir / "claimed" / (r["job_id"] + ".json")
@@ -2300,7 +2357,11 @@ def _dispatch(run_dir, runs, entries, pool_size, now, plan=None) -> list[dict]:
         r["started"] = True
         inflight += 1
         # FR-61: apply the designated {var} pass BEFORE the reserved placeholders.
-        raw = _apply_vars(entry.get("worker_prompt", ""), _entry_vars(plan, entry))
+        raw = _apply_vars(entry.get("prompt", ""), _entry_vars(plan, entry))
+        # agent mode gets the auto-injected placeholder preamble (settled
+        # decision 3); shell-dispatch modes carry no authored prompt.
+        if entry.get("mode") == "agent":
+            raw = _inject_preamble(raw)
         prompt = _resolve_template(raw, values)
         if mode == "shell":
             # Write the prompt to a file (quoting/arg-length safety) and
@@ -2311,7 +2372,7 @@ def _dispatch(run_dir, runs, entries, pool_size, now, plan=None) -> list[dict]:
             sh_values = dict(values, PROMPT_FILE=str(prompt_file),
                              LOCK_FILE=str(lock_file))   # FR-41 PID backstop
             cmd_template = (adapter_cmd if adapter_cmd is not None
-                            else (entry.get("worker_cmd") or []))
+                            else (entry.get("command") or []))
             worker_cmd = [_resolve_template(tok, sh_values)
                           for tok in cmd_template]
             out.append({
@@ -2579,11 +2640,37 @@ def _arunner_version() -> str:
 # It reports ALL problems at once so an adopter fixes config proactively rather
 # than discovering it as a reactive AUTH_OR_LAUNCH_FAILED after launch spend.
 
-_VALID_DISPATCH_MODES = ("subagent", "shell")
+# Strict-keys (additionalProperties:false) allowed-key sets, per mode. The
+# --check validator rejects any unknown job/step key (a typo like `promt`/`repoo`
+# fails here, not silently at dispatch), in lockstep with plan.schema.json.
+_COMMON_JOB_KEYS = frozenset(("id", "repo", "mode", "description", "_comment"))
+_ADAPTER_OPT_KEYS = frozenset(("adapter_activity_patterns", "keepalive_seconds",
+                               "launch_grace_minutes", "stall_threshold_minutes"))
+_MODE_JOB_KEYS = {
+    "agent": frozenset(("prompt", "prompt_file", "vars", "heartbeat_path")),
+    "command": frozenset(("command", "auth_check", "vars", "heartbeat_path")) | _ADAPTER_OPT_KEYS,
+    "log": frozenset(("log_path", "command", "success_regex", "failure_regex",
+                      "sentinel_file", "pid", "vars", "heartbeat_path")) | _ADAPTER_OPT_KEYS,
+    "pipeline": frozenset(("steps", "vars")),
+    "shell": frozenset(("command", "auth_check", "vars", "heartbeat_path")),
+}
+_COMMON_STEP_KEYS = frozenset(("mode", "label", "repo", "description", "_comment",
+                               "vars", "gate"))
+_MODE_STEP_KEYS = {
+    "agent": frozenset(("prompt", "prompt_file")),
+    "command": frozenset(("command", "auth_check")) | _ADAPTER_OPT_KEYS,
+    "log": frozenset(("log_path", "command", "success_regex", "failure_regex",
+                      "sentinel_file", "pid")) | _ADAPTER_OPT_KEYS,
+    "shell": frozenset(("command", "auth_check")),
+}
 # Top-level optional knobs that, IF present, must be integers >= 1 (mirrors
 # plan.schema.json minimums; defaults live in the engine if omitted).
 _PLAN_INT_KEYS = ("tick_interval_minutes", "pool_size", "stall_threshold_minutes",
                   "launch_grace_minutes", "idle_tick_multiplier")
+# The closed set of plan-root keys (additionalProperties:false, == plan.schema.json).
+_PLAN_KEYS = frozenset(_PLAN_INT_KEYS + (
+    "schema_version", "description", "_comment", "keepalive_seconds", "vars",
+    "defaults", "allow_reasoning_gates", "measurement", "jobs"))
 # Reuse the engine's substitution sets so the check can NEVER drift from what
 # _dispatch actually substitutes (FR-42). _KNOWN_PLACEHOLDERS catches typos like
 # {HEARTBEATPATH}; the subagent prompt must carry the full _PLACEHOLDERS block.
@@ -2708,51 +2795,75 @@ def _check_activity_patterns(tag: str, e: dict, problems: list) -> None:
             problems.append("%s: %s: %r" % (sub, prob, pat))
 
 
-def _check_adapter_entry(tag: str, e: dict) -> list:
-    """FR-41: validate an `adapter: wrap|tail` entry. The engine synthesizes
-    the worker_cmd, so the worker_prompt/placeholder plumbing is NOT required
-    here — the operator declares intent in one place. FR-56 adds activity-
-    pattern validation + compiles all adapter regexes (success/failure too)."""
+def _check_command_mode(tag: str, e: dict) -> list:
+    """`command` mode: arunner runs+watches an argv and SYNTHESIZES the heartbeat
+    plumbing (doneness = exit code; operator wires nothing). Requires a non-empty
+    `command` argv. FR-56 activity patterns optional."""
     p = []
-    adapter = e.get("adapter")
-    if adapter not in _VALID_ADAPTERS:
-        p.append("%s.adapter: must be one of %s (got %r)"
-                 % (tag, list(_VALID_ADAPTERS), adapter))
-    if e.get("dispatch_mode") not in (None, "shell"):
-        p.append("%s.dispatch_mode: an adapter entry runs as 'shell' "
-                 "(got %r)" % (tag, e.get("dispatch_mode")))
-    if adapter == "wrap":
-        cmd = e.get("command")
-        if not (isinstance(cmd, list) and cmd and all(isinstance(t, str) for t in cmd)):
-            p.append("%s.command: wrap requires a non-empty array of strings" % tag)
-    elif adapter == "tail":
-        if not (isinstance(e.get("log_path"), str) and e.get("log_path")):
-            p.append("%s.log_path: tail requires a non-empty string" % tag)
-        if "command" in e and not (isinstance(e["command"], list)
-                                   and all(isinstance(t, str) for t in e["command"])):
-            p.append("%s.command: must be an array of strings" % tag)
-        for key in ("success_regex", "failure_regex", "sentinel_file"):
-            if key in e and not isinstance(e[key], str):
-                p.append("%s.%s: must be a string" % (tag, key))
-        if "pid" in e and not (isinstance(e["pid"], int) and not isinstance(e["pid"], bool)):
-            p.append("%s.pid: must be an integer" % tag)
-        # FR-56 retrofit: compile + complexity-screen the doneness regexes too
-        # (today they were only type-checked).
-        for key in ("success_regex", "failure_regex"):
-            if isinstance(e.get(key), str) and e[key]:
-                prob = _regex_problem(e[key])
-                if prob:
-                    p.append("%s.%s: %s: %r" % (tag, key, prob, e[key]))
-    # FR-56: activity patterns apply to BOTH adapters.
+    cmd = e.get("command")
+    if not (isinstance(cmd, list) and cmd and all(isinstance(t, str) for t in cmd)):
+        p.append("%s.command: command mode requires a non-empty array of strings" % tag)
     _check_activity_patterns(tag, e, p)
+    return p
+
+
+def _check_log_mode(tag: str, e: dict) -> list:
+    """`log` mode: arunner watches a log a job writes (optionally launching it via
+    `command`). Requires `log_path`; optional doneness overlays + activity
+    patterns; all regexes compiled + complexity-screened (FR-56)."""
+    p = []
+    if not (isinstance(e.get("log_path"), str) and e.get("log_path")):
+        p.append("%s.log_path: log mode requires a non-empty string" % tag)
+    if "command" in e and not (isinstance(e["command"], list)
+                               and all(isinstance(t, str) for t in e["command"])):
+        p.append("%s.command: must be an array of strings" % tag)
+    for key in ("success_regex", "failure_regex", "sentinel_file"):
+        if key in e and not isinstance(e[key], str):
+            p.append("%s.%s: must be a string" % (tag, key))
+    if "pid" in e and not (isinstance(e["pid"], int) and not isinstance(e["pid"], bool)):
+        p.append("%s.pid: must be an integer" % tag)
+    for key in ("success_regex", "failure_regex"):
+        if isinstance(e.get(key), str) and e[key]:
+            prob = _regex_problem(e[key])
+            if prob:
+                p.append("%s.%s: %s: %r" % (tag, key, prob, e[key]))
+    _check_activity_patterns(tag, e, p)
+    return p
+
+
+def _check_shell_mode(tag: str, e: dict) -> list:
+    """`shell` mode: the raw-argv escape hatch — the operator wires the heartbeat
+    themselves. Requires a non-empty `command` that carries the {HEARTBEAT_PATH}
+    route (no synthesis happens). auth_check type-checked separately."""
+    p = []
+    cmd = e.get("command")
+    if not (isinstance(cmd, list) and cmd and all(isinstance(t, str) for t in cmd)):
+        p.append("%s.command: shell mode requires a non-empty array of strings" % tag)
+        return p
+    hb = "{%s}" % _HEARTBEAT_PLACEHOLDER
+    cmd_text = " ".join(t for t in cmd if isinstance(t, str))
+    if hb not in cmd_text:
+        p.append("%s: shell mode has no route for %s -- a shell job wires its own "
+                 "heartbeat, so its command must carry %s (use command/log mode to "
+                 "have arunner synthesize it)" % (tag, hb, hb))
+    # typo / drift catch on UPPERCASE {TOKEN}s in the raw argv (FR-61).
+    for tok in sorted(set(_PLACEHOLDER_TOKEN_RE.findall(cmd_text))):
+        if tok not in _KNOWN_PLACEHOLDERS:
+            p.append("%s: unknown placeholder {%s} (known: %s)"
+                     % (tag, tok, ", ".join(sorted(_KNOWN_PLACEHOLDERS))))
     return p
 
 
 # --- FR-63/64: continuation gates --------------------------------------------
 _GATE_KINDS = ("shell", "reasoning")
-# FR-64 closed outcome set (plus the parametric ``behavior-flag:<name>``).
+# FR-64 closed outcome set (plus the parametric ``behavior-flag:<name>`` and the
+# parametric ``skip-to-next:step-MM`` -- both honored by _apply_gate_outcome).
 _GATE_OUTCOME_SET = frozenset(("continue", "halt", "skip-to-next", "internal_error"))
 _STEP_ID_RE = __import__("re").compile(r"^step-[0-9]{2,}$")
+# The closed set of keys a gate object may carry (additionalProperties:false,
+# in lockstep with plan.schema.json's gate definition).
+_GATE_KEYS = frozenset(("kind", "argv", "outcomes", "default", "skip_to",
+                        "judge_prompt", "judge_prompt_file", "same_context"))
 
 
 def _valid_outcome(s) -> bool:
@@ -2760,7 +2871,12 @@ def _valid_outcome(s) -> bool:
         return False
     if s in _GATE_OUTCOME_SET:
         return True
-    return s.startswith("behavior-flag:") and len(s) > len("behavior-flag:")
+    if s.startswith("behavior-flag:") and len(s) > len("behavior-flag:"):
+        return True
+    # parametric skip forward: skip-to-next:step-MM (honored by _apply_gate_outcome)
+    if s.startswith("skip-to-next:"):
+        return bool(_STEP_ID_RE.match(s.split(":", 1)[1]))
+    return False
 
 
 def _check_gate(tag: str, gate, plan: dict) -> list:
@@ -2773,6 +2889,10 @@ def _check_gate(tag: str, gate, plan: dict) -> list:
     if not isinstance(gate, dict):
         return ["%s: must be a JSON object" % g]
     p = []
+    for k in gate:                               # strict keys (== schema)
+        if k not in _GATE_KEYS:
+            p.append("%s: unknown key %r (typo? allowed: %s)"
+                     % (g, k, ", ".join(sorted(_GATE_KEYS))))
     kind = gate.get("kind")
     if kind not in _GATE_KINDS:
         p.append("%s.kind: must be one of %s (got %r)"
@@ -2848,148 +2968,140 @@ def _check_vars(tag: str, vars_map) -> list:
 
 
 def _resolve_check_prompt(tag: str, e: dict, plan_dir: Path):
-    """Return (prompt_text, error_or_None) for an inline OR file-sourced prompt,
-    reading the file (FR-61) so the placeholder checks run over its content."""
-    wpf = e.get("worker_prompt_file")
+    """Return (prompt_text, error_or_None) for an inline OR file-sourced agent
+    prompt, reading the file (FR-61) so the placeholder typo-check runs over its
+    content."""
+    wpf = e.get("prompt_file")
     if isinstance(wpf, str) and wpf:
         try:
             return _resolve_prompt_file(wpf, plan_dir).read_text(encoding="utf-8"), None
         except OSError as exc:
-            return None, ("%s.worker_prompt_file: cannot read %s (%s)"
+            return None, ("%s.prompt_file: cannot read %s (%s)"
                           % (tag, wpf, exc))
-    wp = e.get("worker_prompt")
+    wp = e.get("prompt")
     return (wp if isinstance(wp, str) else ""), None
 
 
-def _check_dispatch_prompt(tag: str, e: dict, prompt: str) -> list:
-    """The dispatch-mode + placeholder checks for a single-prompt entry/step,
-    operating on the RESOLVED prompt text (inline or file-snapshot). Reuses the
-    engine placeholder tuples so --check can never drift from _dispatch."""
+def _check_agent_prompt(tag: str, e: dict, prompt: str) -> list:
+    """`agent` mode: exactly one of prompt/prompt_file. The placeholder preamble
+    is AUTO-INJECTED by the engine at dispatch (settled decision 3), so --check
+    does NOT require the placeholders be present — it only rejects an unknown
+    {TYPO} token the author wrote (a lowercase {var} / single-brace JSON is
+    invisible here, FR-61)."""
     p = []
-    mode = e.get("dispatch_mode")
-    if mode not in _VALID_DISPATCH_MODES:
-        p.append("%s.dispatch_mode: must be one of %s (got %r)"
-                 % (tag, list(_VALID_DISPATCH_MODES), mode))
-    cmd = e.get("worker_cmd") if isinstance(e.get("worker_cmd"), list) else []
-    cmd_text = " ".join(t for t in cmd if isinstance(t, str))
-    if mode == "subagent":
-        for ph in _PLACEHOLDERS:
-            if ("{%s}" % ph) not in prompt:
-                p.append("%s.worker_prompt: missing placeholder {%s}" % (tag, ph))
-    elif mode == "shell":
-        if not cmd:
-            p.append("%s.worker_cmd: required (non-empty) for shell dispatch" % tag)
-        else:
-            hb = "{%s}" % _HEARTBEAT_PLACEHOLDER
-            via_cmd = hb in cmd_text
-            via_prompt = ("{PROMPT_FILE}" in cmd_text) and (hb in prompt)
-            if not (via_cmd or via_prompt):
-                p.append("%s: shell entry has no route for %s -- put it in "
-                         "worker_cmd, or reference {PROMPT_FILE} in worker_cmd "
-                         "with the prompt carrying it" % (tag, hb))
-    # typo / drift catch: only UPPERCASE {TOKEN}s are placeholder-shaped, so a
-    # lowercase {var} or literal single-brace JSON is invisible here (FR-61).
-    for tok in sorted(set(_PLACEHOLDER_TOKEN_RE.findall(prompt + " " + cmd_text))):
+    have = [n for n, ok in (
+        ("prompt", isinstance(e.get("prompt"), str) and e.get("prompt")),
+        ("prompt_file", isinstance(e.get("prompt_file"), str) and e.get("prompt_file")),
+    ) if ok]
+    if len(have) == 0:
+        p.append("%s: agent mode needs a prompt or prompt_file" % tag)
+    elif len(have) > 1:
+        p.append("%s: exactly one of prompt / prompt_file (got %s)"
+                 % (tag, ", ".join(have)))
+    for tok in sorted(set(_PLACEHOLDER_TOKEN_RE.findall(prompt or ""))):
         if tok not in _KNOWN_PLACEHOLDERS:
             p.append("%s: unknown placeholder {%s} (known: %s)"
                      % (tag, tok, ", ".join(sorted(_KNOWN_PLACEHOLDERS))))
     return p
 
 
-def _check_steps(tag: str, e: dict, plan_dir: Path, plan: dict) -> list:
-    """FR-62: validate a multi-step entry's ``steps`` -- non-empty array; each
-    step its own single prompt source + optional vars + optional FR-63 gate."""
+def _check_mode_payload(tag, e, mode, plan_dir, plan, run_auth, allowed):
+    """Strict-keys + per-mode required/typed checks for ONE job or step.
+    ``allowed`` is the mode's permitted-key set (additionalProperties:false).
+    A gate (steps only) is validated by the caller."""
     p = []
-    steps = e.get("steps")
-    if not (isinstance(steps, list) and steps):
-        return ["%s.steps: must be a non-empty array of step objects" % tag]
-    for m, step in enumerate(steps):
-        stag = "%s.steps[%d]" % (tag, m)
-        if not isinstance(step, dict):
-            p.append("%s: must be a JSON object" % stag)
-            continue
-        ssrc = [n for n, ok in (
-            ("worker_prompt", isinstance(step.get("worker_prompt"), str) and step.get("worker_prompt")),
-            ("worker_prompt_file", isinstance(step.get("worker_prompt_file"), str) and step.get("worker_prompt_file")),
-            ("adapter", bool(step.get("adapter"))),
-        ) if ok]
-        if len(ssrc) != 1:
-            p.append("%s: needs exactly one prompt source -- worker_prompt, "
-                     "worker_prompt_file, or adapter (got %s)"
-                     % (stag, ", ".join(ssrc) or "none"))
-        p.extend(_check_vars(stag, step.get("vars")))
-        prompt, perr = _resolve_check_prompt(stag, step, plan_dir)
-        if perr:
-            p.append(perr)
-        elif len(ssrc) == 1 and ssrc[0] == "adapter":
-            p.extend(_check_adapter_entry(stag, step))
-        elif len(ssrc) == 1:
-            mode = step.get("dispatch_mode", "subagent")     # steps default subagent
-            p.extend(_check_dispatch_prompt(stag, dict(step, dispatch_mode=mode), prompt))
-        if "gate" in step:
-            p.extend(_check_gate(stag, step.get("gate"), plan))
-    return p
-
-
-def _check_entry(i: int, e, run_auth: bool, plan_dir: Path, plan: dict) -> list:
-    tag = "entries[%d]" % i
-    if not isinstance(e, dict):
-        return ["%s: must be a JSON object" % tag]
-    p = []
-    # task_id / target_repo always required.
-    for key in ("task_id", "target_repo"):
-        if not (isinstance(e.get(key), str) and e.get(key)):
-            p.append("%s.%s: required non-empty string" % (tag, key))
-    # FR-61/62: EXACTLY ONE prompt source (the plan.schema.json oneOf):
-    # worker_prompt | worker_prompt_file | steps | adapter.
-    sources = [n for n, ok in (
-        ("worker_prompt", isinstance(e.get("worker_prompt"), str) and e.get("worker_prompt")),
-        ("worker_prompt_file", isinstance(e.get("worker_prompt_file"), str) and e.get("worker_prompt_file")),
-        ("steps", isinstance(e.get("steps"), list) and e.get("steps")),
-        ("adapter", bool(e.get("adapter"))),
-    ) if ok]
-    if len(sources) == 0:
-        p.append("%s: needs exactly one prompt source -- worker_prompt, "
-                 "worker_prompt_file, steps, or adapter" % tag)
-    elif len(sources) > 1:
-        p.append("%s: exactly one of {worker_prompt, worker_prompt_file, steps, "
-                 "adapter} is allowed (got %s)" % (tag, ", ".join(sources)))
-    p.extend(_check_vars(tag, e.get("vars")))            # FR-61 entry-level vars
-    # optional typed fields
-    if "heartbeat_path" in e and not isinstance(e["heartbeat_path"], str):
-        p.append("%s.heartbeat_path: must be a string" % tag)
-    for key in ("worker_cmd", "auth_check"):
-        if key in e and not (isinstance(e[key], list)
-                             and all(isinstance(t, str) for t in e[key])):
-            p.append("%s.%s: must be an array of strings" % (tag, key))
-
-    primary = sources[0] if len(sources) == 1 else None
-    if primary == "adapter":
-        p.extend(_check_adapter_entry(tag, e))
-    elif primary == "steps":
-        p.extend(_check_steps(tag, e, plan_dir, plan))
-    elif primary in ("worker_prompt", "worker_prompt_file"):
+    # strict keys (additionalProperties:false) — a typo like `promt`/`repoo`
+    # fails HERE, not silently at dispatch.
+    for k in e:
+        if k not in allowed:
+            p.append("%s: unknown key %r (typo? allowed for mode %r: %s)"
+                     % (tag, k, mode, ", ".join(sorted(allowed))))
+    p.extend(_check_vars(tag, e.get("vars")))
+    if "auth_check" in e and not (isinstance(e["auth_check"], list)
+                                  and all(isinstance(t, str) for t in e["auth_check"])):
+        p.append("%s.auth_check: must be an array of strings" % tag)
+    if mode == "agent":
         prompt, perr = _resolve_check_prompt(tag, e, plan_dir)
         if perr:
             p.append(perr)
         else:
-            p.extend(_check_dispatch_prompt(tag, e, prompt))
-            if (run_auth and e.get("dispatch_mode") == "shell"
-                    and isinstance(e.get("auth_check"), list) and e["auth_check"]):
-                rc, detail = _run_auth_check(e["auth_check"])
-                if rc != 0:
-                    p.append("%s.auth_check: failed (%s)" % (tag, detail))
+            p.extend(_check_agent_prompt(tag, e, prompt))
+    elif mode == "command":
+        p.extend(_check_command_mode(tag, e))
+    elif mode == "log":
+        p.extend(_check_log_mode(tag, e))
+    elif mode == "shell":
+        p.extend(_check_shell_mode(tag, e))
+        if (run_auth and isinstance(e.get("auth_check"), list) and e["auth_check"]):
+            rc, detail = _run_auth_check(e["auth_check"])
+            if rc != 0:
+                p.append("%s.auth_check: failed (%s)" % (tag, detail))
+    return p
 
-    # target_repo existence (all paths)
-    tr = e.get("target_repo")
+
+def _check_step(stag: str, step, plan_dir: Path, plan: dict) -> list:
+    """Validate ONE pipeline step: a mini-job with its own `mode` (agent/command/
+    log/shell), the per-mode required field, strict keys, optional vars + FR-63
+    gate."""
+    if not isinstance(step, dict):
+        return ["%s: must be a JSON object" % stag]
+    p = []
+    mode = step.get("mode")
+    if mode not in _STEP_MODES:
+        p.append("%s.mode: must be one of %s (got %r)"
+                 % (stag, list(_STEP_MODES), mode))
+        return p
+    allowed = _COMMON_STEP_KEYS | _MODE_STEP_KEYS[mode]
+    p.extend(_check_mode_payload(stag, step, mode, plan_dir, plan, False, allowed))
+    if "gate" in step:
+        p.extend(_check_gate(stag, step.get("gate"), plan))
+    return p
+
+
+def _check_job(i: int, e, run_auth: bool, plan_dir: Path, plan: dict) -> list:
+    tag = "jobs[%d]" % i
+    if not isinstance(e, dict):
+        return ["%s: must be a JSON object" % tag]
+    p = []
+    # id / repo / mode always required.
+    for key in ("id", "repo"):
+        if not (isinstance(e.get(key), str) and e.get(key)):
+            p.append("%s.%s: required non-empty string" % (tag, key))
+    mode = e.get("mode")
+    if mode not in _JOB_MODES:
+        p.append("%s.mode: must be one of %s (got %r)" % (tag, list(_JOB_MODES), mode))
+        return p                                # without a known mode, stop here
+    if "heartbeat_path" in e and not isinstance(e["heartbeat_path"], str):
+        p.append("%s.heartbeat_path: must be a string" % tag)
+    allowed = _COMMON_JOB_KEYS | _MODE_JOB_KEYS[mode]
+    if mode == "pipeline":
+        # strict keys + vars, then per-step validation.
+        for k in e:
+            if k not in allowed:
+                p.append("%s: unknown key %r (typo? allowed for mode 'pipeline': %s)"
+                         % (tag, k, ", ".join(sorted(allowed))))
+        p.extend(_check_vars(tag, e.get("vars")))
+        steps = e.get("steps")
+        if not (isinstance(steps, list) and steps):
+            p.append("%s.steps: pipeline mode requires a non-empty array of step objects" % tag)
+        else:
+            for m, step in enumerate(steps):
+                p.extend(_check_step("%s.steps[%d]" % (tag, m), step, plan_dir, plan))
+    else:
+        p.extend(_check_mode_payload(tag, e, mode, plan_dir, plan, run_auth, allowed))
+
+    # repo existence (all modes)
+    tr = e.get("repo")
     if isinstance(tr, str) and tr and not Path(tr).is_dir():
-        p.append("%s.target_repo: not an existing directory: %s" % (tag, tr))
+        p.append("%s.repo: not an existing directory: %s" % (tag, tr))
     return p
 
 
 def check_plan(plan_path, run_auth: bool = False) -> list:
     """Validate a plan and return a list of ALL problems (empty == clean).
-    Never launches anything (auth_check runs only when run_auth=True)."""
+    Never launches anything (auth_check runs only when run_auth=True). The
+    runtime enforcer (FR-42, NFR-3 stdlib-only) — agrees field-for-field with
+    plan.schema.json. `defaults` are merged under each job before validation."""
     try:
         plan = json.loads(Path(plan_path).read_text(encoding="utf-8"))
     except OSError as exc:
@@ -2999,6 +3111,12 @@ def check_plan(plan_path, run_auth: bool = False) -> list:
     if not isinstance(plan, dict):
         return ["plan: top level must be a JSON object"]
     problems = []
+    for k in plan:                               # plan-root strict keys (== schema)
+        if k not in _PLAN_KEYS:
+            problems.append("plan: unknown top-level key %r (typo? allowed: %s)"
+                            % (k, ", ".join(sorted(_PLAN_KEYS))))
+    if "defaults" in plan and not isinstance(plan["defaults"], dict):
+        problems.append("plan.defaults: must be a JSON object")
     for k in _PLAN_INT_KEYS:
         if k in plan and not _is_pos_int(plan[k]):
             problems.append("plan.%s: must be an integer >= 1 (got %r)" % (k, plan[k]))
@@ -3009,17 +3127,17 @@ def check_plan(plan_path, run_auth: bool = False) -> list:
     for bkey in ("allow_reasoning_gates", "measurement"):  # FR-63 fences
         if bkey in plan and not isinstance(plan[bkey], bool):
             problems.append("plan.%s: must be a boolean" % bkey)
-    entries = plan.get("entries")
-    if not isinstance(entries, list) or not entries:
-        problems.append("plan.entries: a non-empty array is required")
-        return problems                      # nothing per-entry to check
+    if not (isinstance(plan.get("jobs"), list) and plan.get("jobs")):
+        problems.append("plan.jobs: a non-empty array is required")
+        return problems                      # nothing per-job to check
+    jobs = _merge_defaults(plan)             # effective jobs (defaults merged)
     plan_dir = Path(plan_path).resolve().parent          # FR-61 prompt-file base
-    for i, e in enumerate(entries):
-        problems.extend(_check_entry(i, e, run_auth, plan_dir, plan))
+    for i, e in enumerate(jobs):
+        problems.extend(_check_job(i, e, run_auth, plan_dir, plan))
 
     # FR-58a: the keepalive/activity-refresh interval must land WITHIN launch
     # grace (else the first IN_PROGRESS never beats LAUNCH-FAIL). Fail-loud at
-    # --check, plan-level + per-entry override; explicit-override-wins; the 1s
+    # --check, plan-level + per-job override; explicit-override-wins; the 1s
     # floor is applied at runtime (Postel), so only keepalive>grace is rejected.
     plan_grace = plan.get("launch_grace_minutes", DEFAULT_LAUNCH_GRACE_MINUTES)
 
@@ -3042,10 +3160,10 @@ def check_plan(plan_path, run_auth: bool = False) -> list:
         prob = _ka_problem("plan", plan["keepalive_seconds"], plan_grace)
         if prob:
             problems.append(prob)
-    for i, e in enumerate(entries):
+    for i, e in enumerate(jobs):
         if isinstance(e, dict) and "keepalive_seconds" in e:
             eg = e.get("launch_grace_minutes", plan_grace)
-            prob = _ka_problem("entries[%d]" % i, e["keepalive_seconds"], eg)
+            prob = _ka_problem("jobs[%d]" % i, e["keepalive_seconds"], eg)
             if prob:
                 problems.append(prob)
     return problems

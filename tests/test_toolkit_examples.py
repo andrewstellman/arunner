@@ -41,9 +41,9 @@ class ToolkitPlanBuilderTests(unittest.TestCase):
 
     def _expand_check(self, doc):
         plan = JOBS.expand_jobs(doc)
-        for e in plan.get("entries", []):
-            if e.get("target_repo"):
-                e["target_repo"] = str(self.real)   # illustrative path -> real dir
+        for e in plan.get("jobs", []):
+            if e.get("repo"):
+                e["repo"] = str(self.real)          # illustrative path -> real dir
         with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False) as fh:
             fh.write(json.dumps(plan)); path = fh.name
         try:
@@ -53,20 +53,20 @@ class ToolkitPlanBuilderTests(unittest.TestCase):
 
     def test_toolkit_worked_example_exists_and_validates(self):
         # the doc points at this file; it must expand + --check clean.
-        self.assertIn("toolkit_walkthrough.jobs.json", _TOOLKIT)
-        ex = _ROOT / "examples" / "toolkit_walkthrough.jobs.json"
+        self.assertIn("toolkit_walkthrough.json", _TOOLKIT)
+        ex = _ROOT / "examples" / "toolkit_walkthrough.json"
         self.assertTrue(ex.is_file(), "TOOLKIT worked-example file missing")
         doc = json.loads(ex.read_text(encoding="utf-8"))
-        # it is the documented mix: subagent reviews + a wrap adapter job
-        agents = [j for j in doc["jobs"] if j.get("agent") == "subagent"]
-        adapters = [j for j in doc["jobs"] if j.get("adapter")]
-        self.assertTrue(agents and adapters, "walkthrough should mix subagent + adapter")
+        # it is the documented mix: agent reviews + a command job
+        agents = [j for j in doc["jobs"] if j.get("mode") == "agent"]
+        commands = [j for j in doc["jobs"] if j.get("mode") == "command"]
+        self.assertTrue(agents and commands, "walkthrough should mix agent + command")
         self.assertEqual(self._expand_check(doc), [])
 
     def test_toolkit_documents_the_procedure(self):
-        # the load-bearing steps an agent must follow are present.
-        for needle in ("--check", "jobs.py expand", "adapter", "wrap", "tail",
-                       "subagent", "{HEARTBEAT_PATH}", "Building a plan"):
+        # the load-bearing steps an agent must follow are present (one format).
+        for needle in ("--check", "mode", "agent", "command", "log", "pipeline",
+                       "shell", "{HEARTBEAT_PATH}", "Building a plan"):
             self.assertIn(needle, _TOOLKIT, "TOOLKIT missing: %r" % needle)
 
     def test_toolkit_steers_to_placeholders_not_hand_written_paths(self):
@@ -80,16 +80,16 @@ class ToolkitPlanBuilderTests(unittest.TestCase):
         ok = TICK._format_check_report("plan.json", [])
         self.assertEqual(ok, "plan OK: plan.json -- no problems found")
         self.assertIn(ok, _TOOLKIT)                       # doc quotes the EXACT line
-        fail = TICK._format_check_report("plan.json", ["entries[0].task_id: bad"])
+        fail = TICK._format_check_report("plan.json", ["jobs[0].id: bad"])
         self.assertTrue(fail.startswith("plan FAILED:") and "problem(s):" in fail)
         self.assertIn("plan FAILED:", _TOOLKIT)
         self.assertIn("problem(s):", _TOOLKIT)
 
     def test_a_hand_built_request_validates(self):
-        # a second worked request (shell wrap + tail) also expand+checks clean.
+        # a second worked request (command + log) also expand+checks clean.
         doc = {"pool_size": 2, "jobs": [
-            {"repo": "/abs/a", "adapter": "wrap", "command": ["make", "test"]},
-            {"repo": "/abs/b", "adapter": "tail", "log_path": "/abs/b/run.log",
+            {"id": "a", "repo": "/abs/a", "mode": "command", "command": ["make", "test"]},
+            {"id": "b", "repo": "/abs/b", "mode": "log", "log_path": "/abs/b/run.log",
              "success_regex": "PASSED"}]}
         self.assertEqual(self._expand_check(doc), [])
 

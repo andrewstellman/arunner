@@ -38,17 +38,15 @@ def _load_tick():
 
 
 T = _load_tick()
-_PH = "".join("{%s}" % p for p in T._PLACEHOLDERS)
 
 
 def _entry(tid):
-    return {"task_id": tid, "target_repo": "/tmp", "dispatch_mode": "subagent",
-            "worker_prompt": "go " + _PH}
+    return {"id": tid, "repo": "/tmp", "mode": "agent", "prompt": "go"}
 
 
 def _ms_entry(tid, n):
-    return {"task_id": tid, "target_repo": "/tmp", "dispatch_mode": "subagent",
-            "steps": [{"label": "s%d" % i, "worker_prompt": "s%d " % i + _PH}
+    return {"id": tid, "repo": "/tmp", "mode": "pipeline",
+            "steps": [{"label": "s%d" % i, "mode": "agent", "prompt": "s%d" % i}
                       for i in range(n)]}
 
 
@@ -87,7 +85,7 @@ class _Base(unittest.TestCase):
 
 class SinglePromptTests(_Base):
     def test_usage_lands_in_result_and_table(self):
-        rd = self._init({"pool_size": 1, "entries": [_entry("t1")]})
+        rd = self._init({"pool_size": 1, "jobs": [_entry("t1")]})
         T.tick(rd)
         self._hb(rd / "run-01" / "heartbeat.ndjson")
         out = T.tick(rd)
@@ -97,7 +95,7 @@ class SinglePromptTests(_Base):
         self.assertIn("100/20", out["status_table"])
 
     def test_no_usage_shows_dash_never_zero(self):
-        rd = self._init({"pool_size": 1, "entries": [_entry("t1")]})
+        rd = self._init({"pool_size": 1, "jobs": [_entry("t1")]})
         T.tick(rd)
         self._hb(rd / "run-01" / "heartbeat.ndjson", usage=None)
         out = T.tick(rd)
@@ -110,7 +108,7 @@ class SinglePromptTests(_Base):
         self.assertEqual(sj["tokens"]["label"], "no token usage reported")
 
     def test_malformed_usage_skipped_with_warning(self):
-        rd = self._init({"pool_size": 1, "entries": [_entry("t1")]})
+        rd = self._init({"pool_size": 1, "jobs": [_entry("t1")]})
         T.tick(rd)
         self._hb(rd / "run-01" / "heartbeat.ndjson", usage="bad")
         T.tick(rd)
@@ -121,7 +119,7 @@ class SinglePromptTests(_Base):
                       (rd / "harness_tick.log").read_text())
 
     def test_partial_run_labeled(self):
-        rd = self._init({"pool_size": 2, "entries": [_entry("t1"), _entry("t2")]})
+        rd = self._init({"pool_size": 2, "jobs": [_entry("t1"), _entry("t2")]})
         T.tick(rd)
         self._hb(rd / "run-01" / "heartbeat.ndjson")           # reports usage
         self._hb(rd / "run-02" / "heartbeat.ndjson", usage=None)  # no usage
@@ -132,7 +130,7 @@ class SinglePromptTests(_Base):
 
     def test_tokens_never_change_done(self):
         # an IN_PROGRESS line carrying data.usage must NOT make a run done.
-        rd = self._init({"pool_size": 1, "entries": [_entry("t1")]})
+        rd = self._init({"pool_size": 1, "jobs": [_entry("t1")]})
         T.tick(rd)
         self._hb(rd / "run-01" / "heartbeat.ndjson", status="IN_PROGRESS")
         out = T.tick(rd)
@@ -146,7 +144,7 @@ class MultiStepTokenTests(_Base):
         self._hb(sd / "heartbeat.ndjson", usage=usage)
 
     def test_additive_rollup_multistep(self):
-        rd = self._init({"pool_size": 1, "entries": [_ms_entry("t1", 2)]})
+        rd = self._init({"pool_size": 1, "jobs": [_ms_entry("t1", 2)]})
         T.tick(rd)
         self._complete_step(rd, 0, {"input_tokens": 100, "output_tokens": 10})
         T.tick(rd)

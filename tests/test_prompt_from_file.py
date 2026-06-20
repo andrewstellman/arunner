@@ -70,8 +70,7 @@ class _Base(unittest.TestCase):
 
 
 def _file_entry(tid, wpf, repo, **extra):
-    e = {"task_id": tid, "target_repo": repo, "dispatch_mode": "subagent",
-         "worker_prompt_file": wpf}
+    e = {"id": tid, "repo": repo, "mode": "agent", "prompt_file": wpf}
     e.update(extra)
     return e
 
@@ -81,7 +80,7 @@ class DispatchTests(_Base):
         body = "WORK\n" + _PH + "\nEND"
         (self.tmp / "p.md").write_text(body)
         prompt, rd = self._dispatched_prompt(
-            {"entries": [_file_entry("t1", "p.md", str(self.tmp))]})
+            {"jobs": [_file_entry("t1", "p.md", str(self.tmp))]})
         # the reserved placeholders are resolved; the rest is byte-identical
         expect = body.replace("{HEARTBEAT_PATH}", str(rd / "run-01" / "heartbeat.ndjson")) \
                      .replace("{TASK_ID}", "t1") \
@@ -99,7 +98,7 @@ class DispatchTests(_Base):
         try:
             os.chdir(other.name)        # NOT the plan dir -- proves plan-relative
             prompt, _ = self._dispatched_prompt(
-                {"entries": [_file_entry("t1", "prompts/p.md", str(self.tmp))]})
+                {"jobs": [_file_entry("t1", "prompts/p.md", str(self.tmp))]})
         finally:
             os.chdir(cwd)
             other.cleanup()
@@ -110,7 +109,7 @@ class DispatchTests(_Base):
     def test_snapshot_is_authoritative(self):
         src = self.tmp / "p.md"
         src.write_text("ORIGINAL " + _PH)
-        rd = self._init({"entries": [_file_entry("t1", "p.md", str(self.tmp))]})
+        rd = self._init({"jobs": [_file_entry("t1", "p.md", str(self.tmp))]})
         # snapshot artifact exists in the run-dir (NFR-9 self-sufficiency)
         self.assertTrue((rd / "run-01" / "prompt.snapshot.md").is_file())
         src.write_text("MUTATED " + _PH)   # change the source AFTER --init
@@ -122,7 +121,7 @@ class DispatchTests(_Base):
     def test_skill_fallback_guide_var_round_trips(self):
         (self.tmp / "p.md").write_text("Guide: {skill_fallback_guide}\n" + _PH)
         prompt, _ = self._dispatched_prompt(
-            {"entries": [_file_entry("t1", "p.md", str(self.tmp),
+            {"jobs": [_file_entry("t1", "p.md", str(self.tmp),
                                      vars={"skill_fallback_guide": "USE-THE-GUIDE"})]})
         self.assertIn("Guide: USE-THE-GUIDE", prompt)
         self.assertNotIn("{skill_fallback_guide}", prompt)
@@ -133,7 +132,7 @@ class DispatchTests(_Base):
         json_block = '{"phase": 3, "skip": false, "note": "literal"}'
         (self.tmp / "p.md").write_text(
             "Guide: {skill_fallback_guide}\nJSON: " + json_block + "\n" + _PH)
-        plan = {"entries": [_file_entry("t1", "p.md", str(self.tmp),
+        plan = {"jobs": [_file_entry("t1", "p.md", str(self.tmp),
                                         vars={"skill_fallback_guide": "G"})]}
         # --check is clean (the JSON braces are not placeholder-shaped)
         self.assertEqual(T.check_plan(self._plan_file(plan, "checkplan.json")), [])
@@ -141,10 +140,10 @@ class DispatchTests(_Base):
         self.assertIn(json_block, prompt)            # byte-identical, unmangled
         self.assertIn("Guide: G", prompt)            # the declared var substituted
 
-    def test_inline_worker_prompt_unchanged_regression(self):
-        e = {"task_id": "t1", "target_repo": str(self.tmp),
-             "dispatch_mode": "subagent", "worker_prompt": "INLINE " + _PH}
-        prompt, _ = self._dispatched_prompt({"entries": [e]})
+    def test_inline_prompt_unchanged_regression(self):
+        e = {"id": "t1", "repo": str(self.tmp),
+             "mode": "agent", "prompt": "INLINE " + _PH}
+        prompt, _ = self._dispatched_prompt({"jobs": [e]})
         self.assertIn("INLINE", prompt)
 
 
@@ -153,46 +152,60 @@ class CheckTests(_Base):
         return T.check_plan(self._plan_file(plan, "chk.json"))
 
     def test_both_prompt_sources_is_error(self):
-        e = {"task_id": "t1", "target_repo": str(self.tmp),
-             "dispatch_mode": "subagent", "worker_prompt": _PH,
-             "worker_prompt_file": "p.md"}
+        # agent mode: exactly one of prompt / prompt_file (both = --check error)
+        e = {"id": "t1", "repo": str(self.tmp), "mode": "agent",
+             "prompt": _PH, "prompt_file": "p.md"}
         (self.tmp / "p.md").write_text(_PH)
-        probs = self._check({"entries": [e]})
-        self.assertTrue(any("exactly one" in p for p in probs), probs)
+        probs = self._check({"jobs": [e]})
+        self.assertTrue(any("exactly one of prompt / prompt_file" in p
+                            for p in probs), probs)
 
     def test_no_prompt_source_is_error(self):
-        e = {"task_id": "t1", "target_repo": str(self.tmp), "dispatch_mode": "subagent"}
-        probs = self._check({"entries": [e]})
-        self.assertTrue(any("exactly one prompt source" in p for p in probs), probs)
+        # Re-aimed: an agent job with neither prompt nor prompt_file is rejected
+        # (preserves the "must declare a prompt source" intent).
+        e = {"id": "t1", "repo": str(self.tmp), "mode": "agent"}
+        probs = self._check({"jobs": [e]})
+        self.assertTrue(any("agent mode needs a prompt or prompt_file" in p
+                            for p in probs), probs)
 
     def test_vars_reserved_key_is_error(self):
         (self.tmp / "p.md").write_text(_PH)
         e = _file_entry("t1", "p.md", str(self.tmp), vars={"TASK_ID": "x"})
-        probs = self._check({"entries": [e]})
+        probs = self._check({"jobs": [e]})
         self.assertTrue(any("vars" in p and "reserved" in p for p in probs), probs)
 
     def test_vars_value_reserved_token_is_error(self):
         (self.tmp / "p.md").write_text(_PH)
         e = _file_entry("t1", "p.md", str(self.tmp),
                         vars={"foo": "leak {HEARTBEAT_PATH}"})
-        probs = self._check({"entries": [e]})
+        probs = self._check({"jobs": [e]})
         self.assertTrue(any("vars" in p and "reserved" in p for p in probs), probs)
 
     def test_missing_prompt_file_is_error(self):
         e = _file_entry("t1", "nope.md", str(self.tmp))
-        probs = self._check({"entries": [e]})
+        probs = self._check({"jobs": [e]})
         self.assertTrue(any("cannot read" in p for p in probs), probs)
 
-    def test_file_prompt_missing_placeholder_flagged(self):
-        (self.tmp / "p.md").write_text("no placeholders here")   # missing all 5
+    def test_file_prompt_missing_placeholder_is_clean(self):
+        # Re-aimed (behavior change): agent prompts are now BARE -- the engine
+        # auto-injects the placeholder preamble at dispatch, so a file with NO
+        # reserved placeholders is no longer a --check error (it is clean).
+        (self.tmp / "p.md").write_text("no placeholders here")
         e = _file_entry("t1", "p.md", str(self.tmp))
-        probs = self._check({"entries": [e]})
-        self.assertTrue(any("missing placeholder" in p for p in probs), probs)
+        self.assertEqual(self._check({"jobs": [e]}), [])
+
+    def test_file_prompt_unknown_placeholder_flagged(self):
+        # Re-aimed companion: the placeholder check now rejects an unknown
+        # {TYPO} token the author wrote (vs. the old "missing placeholder").
+        (self.tmp / "p.md").write_text("oops {HEARTBEATPATH}\n" + _PH)
+        e = _file_entry("t1", "p.md", str(self.tmp))
+        probs = self._check({"jobs": [e]})
+        self.assertTrue(any("unknown placeholder" in p for p in probs), probs)
 
     def test_plan_level_vars_validated(self):
         (self.tmp / "p.md").write_text(_PH)
         plan = {"vars": {"RUN_DIR": "x"},
-                "entries": [_file_entry("t1", "p.md", str(self.tmp))]}
+                "jobs": [_file_entry("t1", "p.md", str(self.tmp))]}
         probs = self._check(plan)
         self.assertTrue(any("plan.vars" in p and "reserved" in p for p in probs), probs)
 

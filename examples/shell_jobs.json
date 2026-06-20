@@ -1,0 +1,9 @@
+{
+  "description": "`command` mode jobs: each `command` is run as a child; doneness is its exit code, and its latest output line shows as the activity. arunner synthesizes the heartbeat plumbing — nothing to wire by hand.",
+  "schema_version": "2",
+  "pool_size": 2,
+  "jobs": [
+    {"id": "tests-a", "repo": "/path/to/repo-a", "mode": "command", "command": ["pytest", "-q"]},
+    {"id": "build-b", "repo": "/path/to/repo-b", "mode": "command", "command": ["make", "build"]}
+  ]
+}

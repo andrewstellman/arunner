@@ -1,0 +1,11 @@
+{
+  "description": "UC-10 headline case: 'run abc.exe def.exe ghi.exe jkl.exe, pool 3.' The interactive builder infers `command` mode (each token resolves to a runnable command), so arunner tracks each one's heartbeat and reaps it by exit code. Edit the repo path (and the executable paths/args) before running.",
+  "schema_version": "2",
+  "pool_size": 3,
+  "jobs": [
+    {"id": "abc", "repo": "/path/to/repo", "mode": "command", "command": ["abc.exe"]},
+    {"id": "def", "repo": "/path/to/repo", "mode": "command", "command": ["def.exe"]},
+    {"id": "ghi", "repo": "/path/to/repo", "mode": "command", "command": ["ghi.exe"]},
+    {"id": "jkl", "repo": "/path/to/repo", "mode": "command", "command": ["jkl.exe"]}
+  ]
+}

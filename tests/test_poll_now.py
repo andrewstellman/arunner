@@ -55,10 +55,10 @@ class _Base(unittest.TestCase):
     def _fresh(self, n=1, pool=1, interval=None, idle_mult=None):
         self._n += 1
         os.environ["ARUNNER_RUNS_DIR"] = str(self.tmp / ("runs%d" % self._n))
-        entries = [{"task_id": "t%d" % i, "target_repo": "/tmp",
-                    "dispatch_mode": "subagent", "worker_prompt": "x"}
+        entries = [{"id": "t%d" % i, "repo": "/tmp",
+                    "mode": "agent", "prompt": "x"}
                    for i in range(n)]
-        plan = {"pool_size": pool, "entries": entries}
+        plan = {"pool_size": pool, "jobs": entries}
         if interval is not None:
             plan["tick_interval_minutes"] = interval
         if idle_mult is not None:

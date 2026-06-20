@@ -50,11 +50,11 @@ class _Base(unittest.TestCase):
     def _fresh(self, n=1):
         self._n += 1
         os.environ["ARUNNER_RUNS_DIR"] = str(self.tmp / ("runs%d" % self._n))
-        entries = [{"task_id": "t%d" % i, "target_repo": "/tmp",
-                    "dispatch_mode": "subagent", "worker_prompt": "x"}
+        entries = [{"id": "t%d" % i, "repo": "/tmp",
+                    "mode": "agent", "prompt": "x"}
                    for i in range(n)]
         pf = self.tmp / ("plan%d.json" % self._n)
-        pf.write_text(json.dumps({"pool_size": n, "entries": entries}))
+        pf.write_text(json.dumps({"pool_size": n, "jobs": entries}))
         return Path(T.init_run(pf))
 
     def _status(self, rd):

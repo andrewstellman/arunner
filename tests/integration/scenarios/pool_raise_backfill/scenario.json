@@ -1,46 +1,73 @@
 {
   "description": "FR-37 POOL raise: start at pool 1 with three HELD workers (only one can dispatch); drop `POOL 3` mid-run; the next tick back-fills dispatch up to the new pool, so in-flight rises to 3. Held workers never terminate (deterministic: dispatch sets 'claimed' synchronously, so the in-flight rise is observed on the settle runner with no wall-clock race).",
   "plan": {
-    "schema_version": "1",
+    "schema_version": "2",
     "tick_interval_minutes": 1,
     "pool_size": 1,
     "stall_threshold_minutes": 45,
     "launch_grace_minutes": 10,
-    "entries": [
+    "jobs": [
       {
-        "task_id": "pool-1",
-        "target_repo": "{SCENARIO_DIR}",
-        "dispatch_mode": "shell",
-        "worker_prompt": "stub pool-1",
-        "worker_cmd": [
-          "python3", "{STUB}", "--heartbeat", "{HEARTBEAT_PATH}",
-          "--task-id", "{TASK_ID}", "--run-dir", "{RUN_DIR}",
-          "--steps", "1", "--sleep", "0.2",
-          "--hold-file", "{RUN_DIR}/release_never"
+        "id": "pool-1",
+        "repo": "{SCENARIO_DIR}",
+        "mode": "shell",
+        "command": [
+          "python3",
+          "{STUB}",
+          "--heartbeat",
+          "{HEARTBEAT_PATH}",
+          "--task-id",
+          "{TASK_ID}",
+          "--run-dir",
+          "{RUN_DIR}",
+          "--steps",
+          "1",
+          "--sleep",
+          "0.2",
+          "--hold-file",
+          "{RUN_DIR}/release_never"
         ]
       },
       {
-        "task_id": "pool-2",
-        "target_repo": "{SCENARIO_DIR}",
-        "dispatch_mode": "shell",
-        "worker_prompt": "stub pool-2",
-        "worker_cmd": [
-          "python3", "{STUB}", "--heartbeat", "{HEARTBEAT_PATH}",
-          "--task-id", "{TASK_ID}", "--run-dir", "{RUN_DIR}",
-          "--steps", "1", "--sleep", "0.2",
-          "--hold-file", "{RUN_DIR}/release_never"
+        "id": "pool-2",
+        "repo": "{SCENARIO_DIR}",
+        "mode": "shell",
+        "command": [
+          "python3",
+          "{STUB}",
+          "--heartbeat",
+          "{HEARTBEAT_PATH}",
+          "--task-id",
+          "{TASK_ID}",
+          "--run-dir",
+          "{RUN_DIR}",
+          "--steps",
+          "1",
+          "--sleep",
+          "0.2",
+          "--hold-file",
+          "{RUN_DIR}/release_never"
         ]
       },
       {
-        "task_id": "pool-3",
-        "target_repo": "{SCENARIO_DIR}",
-        "dispatch_mode": "shell",
-        "worker_prompt": "stub pool-3",
-        "worker_cmd": [
-          "python3", "{STUB}", "--heartbeat", "{HEARTBEAT_PATH}",
-          "--task-id", "{TASK_ID}", "--run-dir", "{RUN_DIR}",
-          "--steps", "1", "--sleep", "0.2",
-          "--hold-file", "{RUN_DIR}/release_never"
+        "id": "pool-3",
+        "repo": "{SCENARIO_DIR}",
+        "mode": "shell",
+        "command": [
+          "python3",
+          "{STUB}",
+          "--heartbeat",
+          "{HEARTBEAT_PATH}",
+          "--task-id",
+          "{TASK_ID}",
+          "--run-dir",
+          "{RUN_DIR}",
+          "--steps",
+          "1",
+          "--sleep",
+          "0.2",
+          "--hold-file",
+          "{RUN_DIR}/release_never"
         ]
       }
     ]

@@ -223,7 +223,7 @@ def cmd_msg(args) -> int:
             return 2
     # convenience flags layer into args (never override an explicit --args-json key)
     if args.prompt:
-        margs.setdefault("worker_prompt", args.prompt)
+        margs.setdefault("prompt", args.prompt)
     if args.op:
         margs.setdefault("op", args.op)
     if args.minutes is not None:
@@ -234,7 +234,7 @@ def cmd_msg(args) -> int:
         margs.setdefault("text", args.text)
     if args.file:
         doc = json.loads(Path(args.file).read_text(encoding="utf-8"))
-        margs.setdefault("entries", list(_resolve_plan(doc).get("entries") or []))
+        margs.setdefault("jobs", list(_resolve_plan(doc).get("jobs") or []))
     mid = _new_msg_id()
     msg = {"id": mid, "verb": args.msg_verb, "args": margs, "ts": _now_iso()}
     probs = TICK._check_message(msg)
@@ -349,18 +349,19 @@ def cmd_summary(args) -> int:
 
 
 def _job_summary(entry):
-    """Per-job dispatch mode + prompt/command source, derived deterministically
-    from the (expanded) entry — the confirm-gate echo the host agent renders.
-    No inference here: the agent already chose the mode (FR-52 intent ladder);
-    this only RENDERS it."""
-    adapter = entry.get("adapter")
-    if adapter == "wrap":
-        return "SHELL (wrap)", "wraps: %s" % " ".join(entry.get("command") or [])
-    if adapter == "tail":
-        return "SHELL (tail)", "tails: %s" % (entry.get("log_path") or "")
-    if entry.get("dispatch_mode") == "shell":
-        return "SHELL", "worker_cmd: %s" % " ".join(entry.get("worker_cmd") or [])
-    return "SUBAGENT", "in-session agent prompt"
+    """Per-job mode + prompt/command source, derived deterministically from the
+    job — the confirm-gate echo the host agent renders. No inference here: the
+    agent already chose the `mode` (FR-52 intent ladder); this only RENDERS it."""
+    mode = entry.get("mode")
+    if mode == "command":
+        return "COMMAND", "runs: %s" % " ".join(entry.get("command") or [])
+    if mode == "log":
+        return "LOG", "watches: %s" % (entry.get("log_path") or "")
+    if mode == "shell":
+        return "SHELL", "command: %s" % " ".join(entry.get("command") or [])
+    if mode == "pipeline":
+        return "PIPELINE", "%d step(s)" % len(entry.get("steps") or [])
+    return "AGENT", "in-session agent prompt"
 
 
 def cmd_preview(args) -> int:
@@ -370,12 +371,12 @@ def cmd_preview(args) -> int:
     plan_path = Path(args.file).resolve()
     doc = json.loads(plan_path.read_text(encoding="utf-8"))
     plan = _resolve_plan(doc)
-    entries = plan.get("entries", []) if isinstance(plan, dict) else []
+    entries = plan.get("jobs", []) if isinstance(plan, dict) else []
     print("arunner preview: %s - %d job(s), pool %s"
           % (plan_path.name, len(entries), plan.get("pool_size", "default")))
     for i, e in enumerate(entries, start=1):
         disp, src = _job_summary(e)
-        print("  job %d [%s]: %s  %s" % (i, e.get("task_id", "?"), disp, src))
+        print("  job %d [%s]: %s  %s" % (i, e.get("id", "?"), disp, src))
     import tempfile as _t
     tmp = Path(_t.mkdtemp()) / "plan.json"
     tmp.write_text(json.dumps(plan), encoding="utf-8")
@@ -432,31 +433,30 @@ def cmd_add(args) -> int:
         if not cmd:
             print("arunner add: --command needs a command", file=sys.stderr)
             return 2
-        entries = [{"target_repo": args.repo, "dispatch_mode": "shell",
-                    "adapter": "wrap", "command": cmd}]
+        entries = [{"repo": args.repo, "mode": "command", "command": cmd}]
     elif args.file:
         doc = json.loads(Path(args.file).read_text(encoding="utf-8"))
-        entries = list(_resolve_plan(doc).get("entries") or [])
+        entries = list(_resolve_plan(doc).get("jobs") or [])
     else:
         print("arunner add: give a plan/jobs file or --command <cmd ...>",
               file=sys.stderr)
         return 2
     if not entries:
-        print("arunner add: no entries to add", file=sys.stderr)
+        print("arunner add: no jobs to add", file=sys.stderr)
         return 2
 
-    # Mint task_id for any entry lacking one, numbered append-only from the live
-    # entry count, so the --check pre-gate (which requires task_id) passes and
-    # the absorb keeps the same ids.
-    base = len(live_plan.get("entries") or [])
+    # Mint id for any job lacking one, numbered append-only from the live job
+    # count, so the --check pre-gate (which requires id) passes and the absorb
+    # keeps the same ids.
+    base = len(live_plan.get("jobs") or [])
     for j, e in enumerate(entries):
-        if isinstance(e, dict) and not e.get("task_id"):
-            e["task_id"] = "added-%02d" % (base + j + 1)
+        if isinstance(e, dict) and not e.get("id"):
+            e["id"] = "added-%02d" % (base + j + 1)
 
-    # --check PRE-GATE (FR-42): validate the new entries against the live plan's
+    # --check PRE-GATE (FR-42): validate the new jobs against the live plan's
     # knobs BEFORE anything lands in incoming/. A bad add never reaches a tick.
     probe = {k: live_plan[k] for k in _ADD_PROBE_KEYS if k in live_plan}
-    probe["entries"] = entries
+    probe["jobs"] = entries
     if args.pool is not None:
         probe["pool_size"] = args.pool
     tmp = Path(tempfile.mkdtemp()) / "add_probe.json"
@@ -470,14 +470,14 @@ def cmd_add(args) -> int:
     # adds never clobber one another.
     inc = run_dir / "incoming"
     inc.mkdir(exist_ok=True)
-    payload = {"entries": entries}
+    payload = {"jobs": entries}
     if args.pool is not None:
         payload["pool_size"] = args.pool
     n = len(list(inc.glob("add-*.json")))
     staged = inc / ("add-%03d-%d.json" % (n, abs(hash(source)) % 100000))
     staged.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
-    print("arunner: staged %d entr%s to %s (absorbed on the next tick)"
-          % (len(entries), "y" if len(entries) == 1 else "ies", staged))
+    print("arunner: staged %d job%s to %s (absorbed on the next tick)"
+          % (len(entries), "" if len(entries) == 1 else "s", staged))
     return 0
 
 
@@ -518,14 +518,14 @@ def _build_parser() -> argparse.ArgumentParser:
                                     "run-dir, absorbed next tick (FR-57)")
     ad.add_argument("run_dir")
     ad.add_argument("file", nargs="?", default=None,
-                    help="a plan / jobs shorthand whose entries to add")
+                    help="a plan file whose jobs to add")
     ad.add_argument("--command", default=None,
-                    help="add a single wrap-adapter job from a shell command "
+                    help="add a single command-mode job from a shell command "
                          "string, e.g. --command 'make test'")
     ad.add_argument("--pool", type=int, default=None,
                     help="raise the live pool_size as part of this add")
     ad.add_argument("--repo", default=".",
-                    help="target_repo for a --command job (default: .)")
+                    help="repo for a --command job (default: .)")
 
     mon = sub.add_parser("monitor", help="read-only sidecar: re-render the status "
                                          "table from disk on an interval (FR-59)")
@@ -548,8 +548,8 @@ def _build_parser() -> argparse.ArgumentParser:
     mg.add_argument("--args-json", default=None,
                     help="the message args as a JSON object")
     mg.add_argument("--file", default=None,
-                    help="enqueue/run-batch: a plan/jobs file whose entries to stage")
-    mg.add_argument("--prompt", default=None, help="dispatch-job: the worker_prompt")
+                    help="enqueue/run-batch: a plan file whose jobs to stage")
+    mg.add_argument("--prompt", default=None, help="dispatch-job: the agent prompt")
     mg.add_argument("--op", default=None,
                     choices=list(TICK._CONTROL_OPS),
                     help="control: pause/resume/cadence/poll-now/cancel")
