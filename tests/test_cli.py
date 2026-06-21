@@ -59,7 +59,7 @@ class _Base(unittest.TestCase):
 
     def _subagent_jobs(self, n=1):
         return {"pool_size": n, "jobs": [
-            {"id": "j%d" % i, "repo": str(self.tmp), "agent": "subagent",
+            {"id": "j%d" % i, "repo": str(self.tmp), "mode": "agent",
              "prompt": "do %d" % i} for i in range(n)]}
 
     def _cli(self, *argv):
@@ -95,16 +95,18 @@ class VerbTests(_Base):
         self.assertEqual(len(self._status(rd)["runs"]), 2)
 
     def test_run_canonical_passes_through(self):
-        plan = {"pool_size": 1, "entries": [
-            {"task_id": "t", "target_repo": str(self.tmp), "dispatch_mode": "subagent",
-             "worker_prompt": "{HEARTBEAT_PATH}{TASK_ID}{RUN_DIR}{TARGET_REPO}{HARNESS_BIN}"}]}
+        # New collapsed format: a single agent-mode job with a bare prompt.
+        plan = {"pool_size": 1, "jobs": [
+            {"id": "t", "repo": str(self.tmp), "mode": "agent",
+             "prompt": "do the work"}]}
         rc, out, _ = self._cli("run", str(self._write("p.json", plan)), "--no-drive")
         self.assertEqual(rc, 0)
         self.assertIn("initialized", out)
 
     def test_run_reports_check_failures(self):
-        bad = {"entries": [{"task_id": "t", "target_repo": "/no/such/dir",
-                            "dispatch_mode": "rocket", "worker_prompt": "x"}]}
+        # unknown mode is rejected by --check (was dispatch_mode:"rocket").
+        bad = {"jobs": [{"id": "t", "repo": "/no/such/dir",
+                         "mode": "rocket", "prompt": "x"}]}
         rc, out, _ = self._cli("run", str(self._write("bad.json", bad)), "--no-drive")
         self.assertEqual(rc, 1)
         self.assertIn("plan FAILED", out)
@@ -165,7 +167,7 @@ class PersistTests(_Base):
         rc, _, _ = self._cli("expand", str(jf), "--out", str(out_path))
         self.assertEqual(rc, 0)
         plan = json.loads(out_path.read_text())
-        self.assertEqual(len(plan["entries"]), 2)
+        self.assertEqual(len(plan["jobs"]), 2)
         self.assertEqual(TICK.check_plan(out_path), [])    # the written plan is --check clean
 
     def test_my_run_bundle_round_trips(self):

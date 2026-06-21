@@ -64,10 +64,10 @@ class _Base(unittest.TestCase):
         # unique runs dir per init avoids the same-second timestamp collision
         self._n += 1
         os.environ["ARUNNER_RUNS_DIR"] = str(self.tmp / ("runs%d" % self._n))
-        entries = [{"task_id": "t%d" % i, "target_repo": "/tmp",
-                    "dispatch_mode": "subagent", "worker_prompt": "x"}
+        entries = [{"id": "t%d" % i, "repo": "/tmp",
+                    "mode": "agent", "prompt": "x"}
                    for i in range(n)]
-        plan = {"pool_size": pool, "entries": entries}
+        plan = {"pool_size": pool, "jobs": entries}
         if tick_interval is not None:
             plan["tick_interval_minutes"] = tick_interval
         pf = self.tmp / ("plan%d.json" % self._n)

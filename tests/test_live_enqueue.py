@@ -47,8 +47,10 @@ import arunner.cli as CLI
 
 
 def _wrap_entry(task_id, msg="ok"):
-    return {"task_id": task_id, "target_repo": ".", "dispatch_mode": "shell",
-            "adapter": "wrap", "command": ["python3", "-c", "print('%s')" % msg]}
+    # New collapsed format: a command-mode job (was adapter:"wrap"). The job's
+    # plan-authoring id key is "id"; runtime records still surface it as task_id.
+    return {"id": task_id, "repo": ".", "mode": "command",
+            "command": ["python3", "-c", "print('%s')" % msg]}
 
 
 class _Base(unittest.TestCase):
@@ -75,7 +77,7 @@ class _Base(unittest.TestCase):
         return rc, out.getvalue()
 
     def _stage_file(self, entries, pool=None):
-        doc = {"entries": entries}
+        doc = {"jobs": entries}
         if pool is not None:
             doc["pool_size"] = pool
         f = self.runs / "addsrc.json"
@@ -96,15 +98,15 @@ class _Base(unittest.TestCase):
 class StageAndAbsorb(_Base):
 
     def test_add_stages_to_incoming(self):
-        rd = self._init({"pool_size": 2, "entries": [_wrap_entry("a")]})
+        rd = self._init({"pool_size": 2, "jobs": [_wrap_entry("a")]})
         rc, msg = self._add(rd, [str(self._stage_file([_wrap_entry("b")]))])
         self.assertEqual(rc, 0, msg)
         staged = list((rd / "incoming").glob("*.json"))
         self.assertEqual(len(staged), 1, "add did not stage to incoming/")
-        self.assertIn("entries", json.loads(staged[0].read_text()))
+        self.assertIn("jobs", json.loads(staged[0].read_text()))
 
     def test_add_never_touches_live_files(self):            # PIN (race-free)
-        rd = self._init({"pool_size": 2, "entries": [_wrap_entry("a")]})
+        rd = self._init({"pool_size": 2, "jobs": [_wrap_entry("a")]})
         before_plan = (rd / "plan.json").read_bytes()
         before_status = (rd / "harness_status.json").read_bytes()
         self._add(rd, [str(self._stage_file([_wrap_entry("b")]))])
@@ -115,12 +117,12 @@ class StageAndAbsorb(_Base):
 
     def test_tick_absorbs_and_new_run_completes(self):
         rd = self._init({"pool_size": 2,
-                         "entries": [_wrap_entry("a"), _wrap_entry("b")]})
+                         "jobs": [_wrap_entry("a"), _wrap_entry("b")]})
         self._add(rd, [str(self._stage_file([_wrap_entry("c"), _wrap_entry("d")]))])
         final = self._drive(rd)
         self.assertTrue(final["done"])
         self.assertEqual(final["counts"]["completed"], 4)
-        self.assertEqual(len(json.loads((rd / "plan.json").read_text())["entries"]), 4)
+        self.assertEqual(len(json.loads((rd / "plan.json").read_text())["jobs"]), 4)
         # the staged file was retired
         self.assertEqual(list((rd / "incoming").glob("*.json")), [])
         self.assertEqual(C.check(rd, {"done": True, "counts": {"completed": 4},
@@ -128,7 +130,7 @@ class StageAndAbsorb(_Base):
 
     def test_append_only_numbering(self):                   # PIN
         rd = self._init({"pool_size": 1,
-                         "entries": [_wrap_entry("a"), _wrap_entry("b")]})
+                         "jobs": [_wrap_entry("a"), _wrap_entry("b")]})
         self._add(rd, [str(self._stage_file([_wrap_entry("c")]))])
         # absorb under one tick (subprocess so the .tick.lock is held)
         env = dict(os.environ, ARUNNER_RUNS_DIR=str(self.runs))
@@ -142,14 +144,15 @@ class StageAndAbsorb(_Base):
         self.assertIn("run-03", runs)
         self.assertEqual(runs["run-03"]["task_id"], "c")
         # positional rebuild stays correct: len(entries) == len(runs)
-        entries = json.loads((rd / "plan.json").read_text())["entries"]
+        entries = json.loads((rd / "plan.json").read_text())["jobs"]
         self.assertEqual(len(entries), len(runs))
-        self.assertEqual(entries[2]["task_id"], "c")
+        self.assertEqual(entries[2]["id"], "c")   # plan-authoring key is "id"
 
     def test_check_rejects_bad_add_before_landing(self):
-        rd = self._init({"pool_size": 2, "entries": [_wrap_entry("a")]})
-        bad = self._stage_file([{"task_id": "bad", "target_repo": ".",
-                                 "dispatch_mode": "shell", "adapter": "wrap",
+        rd = self._init({"pool_size": 2, "jobs": [_wrap_entry("a")]})
+        # command mode requires command to be a non-empty array of strings;
+        # a bare string fails the add --check pre-gate, so nothing stages.
+        bad = self._stage_file([{"id": "bad", "repo": ".", "mode": "command",
                                  "command": "not-an-array"}])
         rc, msg = self._add(rd, [str(bad)])
         self.assertEqual(rc, 1, msg)
@@ -159,28 +162,28 @@ class StageAndAbsorb(_Base):
                          and list((rd / "incoming").glob("*.json")))
 
     def test_placeholders_stored_unresolved(self):
-        rd = self._init({"pool_size": 2, "entries": [_wrap_entry("a")]})
-        entry = {"task_id": "ph", "target_repo": "{TARGET_REPO}",
-                 "dispatch_mode": "subagent",
-                 "worker_prompt": "HEARTBEAT_PATH={HEARTBEAT_PATH}\nTASK_ID={TASK_ID}"
-                                  "\nRUN_DIR={RUN_DIR}\nTARGET_REPO={TARGET_REPO}"
-                                  "\nHARNESS_BIN={HARNESS_BIN}\nstub"}
+        rd = self._init({"pool_size": 2, "jobs": [_wrap_entry("a")]})
+        # New format: agent-mode job carrying placeholders in repo + prompt.
+        entry = {"id": "ph", "repo": "{TARGET_REPO}", "mode": "agent",
+                 "prompt": "HEARTBEAT_PATH={HEARTBEAT_PATH}\nTASK_ID={TASK_ID}"
+                           "\nRUN_DIR={RUN_DIR}\nTARGET_REPO={TARGET_REPO}"
+                           "\nHARNESS_BIN={HARNESS_BIN}\nstub"}
         f = self.runs / "ph.json"
-        f.write_text(json.dumps({"entries": [entry]}), encoding="utf-8")
-        # --check the bare placeholder entry would fail on target_repo existence,
+        f.write_text(json.dumps({"jobs": [entry]}), encoding="utf-8")
+        # --check the bare placeholder entry would fail on repo existence,
         # so stage it directly (the absorb stores it verbatim) and absorb.
         (rd / "incoming").mkdir(exist_ok=True)
         (rd / "incoming" / "add-x.json").write_text(
-            json.dumps({"entries": [entry]}), encoding="utf-8")
+            json.dumps({"jobs": [entry]}), encoding="utf-8")
         env = dict(os.environ, ARUNNER_RUNS_DIR=str(self.runs))
         subprocess.run([sys.executable, str(_TICK), str(rd)], env=env,
                        capture_output=True, timeout=60)
-        entries = json.loads((rd / "plan.json").read_text())["entries"]
-        self.assertEqual(entries[-1]["target_repo"], "{TARGET_REPO}")  # UNRESOLVED
-        self.assertIn("{HEARTBEAT_PATH}", entries[-1]["worker_prompt"])
+        entries = json.loads((rd / "plan.json").read_text())["jobs"]
+        self.assertEqual(entries[-1]["repo"], "{TARGET_REPO}")  # UNRESOLVED
+        self.assertIn("{HEARTBEAT_PATH}", entries[-1]["prompt"])
 
     def test_add_to_a_done_run_reactivates(self):
-        rd = self._init({"pool_size": 2, "entries": [_wrap_entry("a")]})
+        rd = self._init({"pool_size": 2, "jobs": [_wrap_entry("a")]})
         final = self._drive(rd)
         self.assertTrue(final["done"])                       # run is DONE
         self._add(rd, [str(self._stage_file([_wrap_entry("b")]))])
@@ -199,7 +202,7 @@ class StageAndAbsorb(_Base):
         # FR-10/FR-35: a STOP tick is fully read-only -- a staged add must wait
         # UNTOUCHED in incoming/ while STOP is present (absorbing on a STOP tick
         # would mutate plan.json/harness_status.json + consume the staged file).
-        rd = self._init({"pool_size": 2, "entries": [_wrap_entry("a")]})
+        rd = self._init({"pool_size": 2, "jobs": [_wrap_entry("a")]})
         self._add(rd, [str(self._stage_file([_wrap_entry("b")]))])
         (rd / "STOP").write_text("", encoding="utf-8")
         plan_before = (rd / "plan.json").read_bytes()
@@ -218,32 +221,32 @@ class StageAndAbsorb(_Base):
         subprocess.run([sys.executable, str(_TICK), str(rd)], env=env,
                        capture_output=True, timeout=60)
         self.assertEqual(
-            len(json.loads((rd / "plan.json").read_text())["entries"]), 2)
+            len(json.loads((rd / "plan.json").read_text())["jobs"]), 2)
 
     def test_two_staged_adds_absorb_in_order(self):
         # concurrent-add safety: multiple staged files all absorb under the lock,
         # append-only, none clobbered.
-        rd = self._init({"pool_size": 3, "entries": [_wrap_entry("a")]})
+        rd = self._init({"pool_size": 3, "jobs": [_wrap_entry("a")]})
         self._add(rd, [str(self._stage_file([_wrap_entry("b")]))])
         # a second add stages a DISTINCT file (unique name)
         f2 = self.runs / "addsrc2.json"
-        f2.write_text(json.dumps({"entries": [_wrap_entry("c")]}), encoding="utf-8")
+        f2.write_text(json.dumps({"jobs": [_wrap_entry("c")]}), encoding="utf-8")
         self._add(rd, [str(f2)])
         self.assertEqual(len(list((rd / "incoming").glob("*.json"))), 2)
         final = self._drive(rd)
         self.assertTrue(final["done"])
         self.assertEqual(final["counts"]["completed"], 3)
-        self.assertEqual(len(json.loads((rd / "plan.json").read_text())["entries"]), 3)
+        self.assertEqual(len(json.loads((rd / "plan.json").read_text())["jobs"]), 3)
 
-    def test_command_form_stages_a_wrap_job(self):
-        rd = self._init({"pool_size": 2, "entries": [_wrap_entry("a")]})
+    def test_command_form_stages_a_command_job(self):
+        rd = self._init({"pool_size": 2, "jobs": [_wrap_entry("a")]})
         rc, msg = self._add(rd, ["--command", "python3 -c \"print(1)\""])
         self.assertEqual(rc, 0, msg)
         staged = json.loads(next((rd / "incoming").glob("*.json")).read_text())
-        e = staged["entries"][0]
-        self.assertEqual(e["adapter"], "wrap")
+        e = staged["jobs"][0]
+        self.assertEqual(e["mode"], "command")               # was adapter:"wrap"
         self.assertEqual(e["command"], ["python3", "-c", "print(1)"])
-        self.assertTrue(e["task_id"])                        # minted
+        self.assertTrue(e["id"])                              # minted
 
 
 if __name__ == "__main__":

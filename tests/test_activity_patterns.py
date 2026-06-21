@@ -109,16 +109,16 @@ class CheckValidation(unittest.TestCase):
         self.assertEqual(self._act([r"Step \d+", "BUILD (OK|DONE)"]), [])
 
     def test_retrofit_compiles_success_regex(self):
-        probs = T._check_adapter_entry(
-            "entries[0]", {"adapter": "tail", "log_path": "x",
-                           "success_regex": "(a+)+"})
+        probs = T._check_log_mode(
+            "jobs[0]", {"mode": "log", "log_path": "x",
+                        "success_regex": "(a+)+"})
         self.assertTrue(any("success_regex" in x and "backtracking" in x
                             for x in probs))
 
     def test_retrofit_bad_failure_regex(self):
-        probs = T._check_adapter_entry(
-            "entries[0]", {"adapter": "tail", "log_path": "x",
-                           "failure_regex": "(unclosed"})
+        probs = T._check_log_mode(
+            "jobs[0]", {"mode": "log", "log_path": "x",
+                        "failure_regex": "(unclosed"})
         self.assertTrue(any("failure_regex" in x and "not a valid" in x
                             for x in probs))
 
@@ -163,13 +163,13 @@ class ComplexityScreenPortability(unittest.TestCase):
 class Synthesis(unittest.TestCase):
 
     def test_wrap_synthesizes_activity_regex_before_command(self):
-        cmd = T._adapter_worker_cmd({"adapter": "wrap", "command": ["make"],
+        cmd = T._adapter_worker_cmd({"mode": "command", "command": ["make"],
                                      "adapter_activity_patterns": [r"Step \d+", "BUILD"]})
         self.assertEqual(cmd.count("--activity-regex"), 2)
         self.assertLess(cmd.index("--activity-regex"), cmd.index("--"))
 
     def test_tail_synthesizes_activity_regex(self):
-        cmd = T._adapter_worker_cmd({"adapter": "tail", "log_path": "x",
+        cmd = T._adapter_worker_cmd({"mode": "log", "log_path": "x",
                                      "adapter_activity_patterns": ["P"]})
         self.assertIn("--activity-regex", cmd)
 

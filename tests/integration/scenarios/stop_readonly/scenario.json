@@ -1,18 +1,17 @@
 {
   "description": "STOP read-only: a worker is dispatched and HELD open; a STOP file is written; the next tick is fully read-only (cycle and run states unchanged) and the run does not reach done.",
   "plan": {
-    "schema_version": "1",
+    "schema_version": "2",
     "tick_interval_minutes": 1,
     "pool_size": 1,
     "stall_threshold_minutes": 45,
     "launch_grace_minutes": 10,
-    "entries": [
+    "jobs": [
       {
-        "task_id": "stop-1",
-        "target_repo": "{SCENARIO_DIR}",
-        "dispatch_mode": "shell",
-        "worker_prompt": "stub stop-1",
-        "worker_cmd": [
+        "id": "stop-1",
+        "repo": "{SCENARIO_DIR}",
+        "mode": "shell",
+        "command": [
           "python3",
           "{STUB}",
           "--heartbeat",
@@ -30,11 +29,10 @@
         ]
       },
       {
-        "task_id": "stop-2",
-        "target_repo": "{SCENARIO_DIR}",
-        "dispatch_mode": "shell",
-        "worker_prompt": "stub stop-2",
-        "worker_cmd": [
+        "id": "stop-2",
+        "repo": "{SCENARIO_DIR}",
+        "mode": "shell",
+        "command": [
           "python3",
           "{STUB}",
           "--heartbeat",

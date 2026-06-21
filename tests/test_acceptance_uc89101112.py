@@ -199,9 +199,9 @@ class Uc10ConversationalBuild(unittest.TestCase):
 
     def test_canonical_is_pool2_three_subagents(self):
         self.assertEqual(self.canonical.get("pool_size"), 2)
-        entries = self.canonical.get("entries", [])
-        self.assertEqual(len(entries), 3)
-        self.assertTrue(all(e.get("dispatch_mode") == "subagent" for e in entries))
+        jobs = self.canonical.get("jobs", [])
+        self.assertEqual(len(jobs), 3)
+        self.assertTrue(all(j.get("mode") == "agent" for j in jobs))
 
     def test_saved_bundle_reruns_faithfully(self):
         bundle = JOBS.session_bundle(self.shorthand)
@@ -279,7 +279,7 @@ class Uc12ActivityPatterns(unittest.TestCase):
 
     def test_wrap_activity_label_is_relevant_not_noise(self):
         plan = _plan("uc12_activity.json")
-        entry = plan["entries"][0]
+        entry = plan["jobs"][0]
         command = entry["command"]
         regex = entry["adapter_activity_patterns"][0]
         d = Path(tempfile.mkdtemp())

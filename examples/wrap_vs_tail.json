@@ -1,0 +1,13 @@
+{
+  "description": "The two host-process modes side by side. Use `command` mode when arunner launches the command (doneness = exit code); use `log` mode when something else writes a log arunner should watch (doneness via the markers, or the process exit if a command/pid is given).",
+  "schema_version": "2",
+  "pool_size": 2,
+  "jobs": [
+    {"id": "command-job", "repo": "/path/to/repo-a", "mode": "command",
+     "command": ["./run-build.sh", "--release"]},
+    {"id": "log-job", "repo": "/path/to/repo-b", "mode": "log",
+     "log_path": "/path/to/repo-b/build.log",
+     "success_regex": "BUILD SUCCESSFUL",
+     "failure_regex": "BUILD FAILED"}
+  ]
+}

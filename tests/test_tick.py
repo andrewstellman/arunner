@@ -62,22 +62,26 @@ T = _load_tick()
 
 def _plan(entries, **top):
     p = {"tick_interval_minutes": 5, "pool_size": top.pop("pool_size", 3),
-         "entries": entries}
+         "jobs": entries}
     p.update(top)
     return p
 
 
 def _entry(tid, repo="/tmp/x"):
-    return {"task_id": tid, "target_repo": repo, "dispatch_mode": "subagent",
-            "worker_prompt": ("HB={HEARTBEAT_PATH} TID={TASK_ID} "
-                              "RD={RUN_DIR} TR={TARGET_REPO}")}
+    # New collapsed format: agent mode with a BARE prompt (the engine
+    # auto-injects the placeholder preamble at dispatch).
+    return {"id": tid, "repo": repo, "mode": "agent",
+            "prompt": ("HB={HEARTBEAT_PATH} TID={TASK_ID} "
+                       "RD={RUN_DIR} TR={TARGET_REPO}")}
 
 
 def _shell_entry(tid, repo="/tmp/x"):
-    return {"task_id": tid, "target_repo": repo, "dispatch_mode": "shell",
-            "worker_prompt": "do work on {TARGET_REPO}",
-            "worker_cmd": ["python3", "w.py", "--hb", "{HEARTBEAT_PATH}",
-                           "--tid", "{TASK_ID}", "--prompt", "{PROMPT_FILE}"]}
+    # New collapsed format: shell mode (raw argv). The command must carry
+    # {HEARTBEAT_PATH} or --check rejects it; the prompt is written to a file.
+    return {"id": tid, "repo": repo, "mode": "shell",
+            "prompt": "do work on {TARGET_REPO}",
+            "command": ["python3", "w.py", "--hb", "{HEARTBEAT_PATH}",
+                        "--tid", "{TASK_ID}", "--prompt", "{PROMPT_FILE}"]}
 
 
 def _hb(run_dir: Path, run: str, **fields):
@@ -126,7 +130,7 @@ class InitTests(_Base):
 
     def test_init_rejects_empty_plan(self):
         pf = self.tmp / "empty.json"
-        pf.write_text(json.dumps({"entries": []}))
+        pf.write_text(json.dumps({"jobs": []}))
         with self.assertRaises(ValueError):
             T.init_run(pf)
 
@@ -583,7 +587,7 @@ class HarnessBinPlaceholderTests(_Base):
 
     def test_harness_bin_substituted_in_subagent_prompt(self):
         e = _entry("t-1")
-        e["worker_prompt"] = "run {HARNESS_BIN}/demo_worker.py"
+        e["prompt"] = "run {HARNESS_BIN}/demo_worker.py"
         rd = self._init(_plan([e], pool_size=1))
         out = T.tick(rd)
         wp = out["dispatch_list"][0]["worker_prompt"]
@@ -593,8 +597,8 @@ class HarnessBinPlaceholderTests(_Base):
 
     def test_harness_bin_substituted_in_shell_cmd(self):
         e = _shell_entry("t-1")
-        e["worker_cmd"] = ["python3", "{HARNESS_BIN}/demo_worker.py",
-                           "--hb", "{HEARTBEAT_PATH}"]
+        e["command"] = ["python3", "{HARNESS_BIN}/demo_worker.py",
+                        "--hb", "{HEARTBEAT_PATH}"]
         rd = self._init(_plan([e], pool_size=1))
         out = T.tick(rd)
         cmd = out["dispatch_list"][0]["worker_cmd"]

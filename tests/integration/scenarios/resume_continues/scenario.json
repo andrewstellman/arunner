@@ -1,18 +1,17 @@
 {
   "description": "PAUSE then RESUME: after resume the queued entry dispatches and the run reaches done.",
   "plan": {
-    "schema_version": "1",
+    "schema_version": "2",
     "tick_interval_minutes": 1,
     "pool_size": 1,
     "stall_threshold_minutes": 45,
     "launch_grace_minutes": 10,
-    "entries": [
+    "jobs": [
       {
-        "task_id": "pr-1",
-        "target_repo": "{SCENARIO_DIR}",
-        "dispatch_mode": "shell",
-        "worker_prompt": "stub pr-1",
-        "worker_cmd": [
+        "id": "pr-1",
+        "repo": "{SCENARIO_DIR}",
+        "mode": "shell",
+        "command": [
           "python3",
           "{STUB}",
           "--heartbeat",
@@ -28,11 +27,10 @@
         ]
       },
       {
-        "task_id": "pr-2",
-        "target_repo": "{SCENARIO_DIR}",
-        "dispatch_mode": "shell",
-        "worker_prompt": "stub pr-2",
-        "worker_cmd": [
+        "id": "pr-2",
+        "repo": "{SCENARIO_DIR}",
+        "mode": "shell",
+        "command": [
           "python3",
           "{STUB}",
           "--heartbeat",

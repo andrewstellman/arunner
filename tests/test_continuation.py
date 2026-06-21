@@ -180,9 +180,9 @@ class TickIntegration(unittest.TestCase):
 
     def _init(self):
         plan = {"schema_version": "1", "pool_size": 1, "tick_interval_minutes": 1,
-                "entries": [{"task_id": "c-1", "target_repo": self.tmp,
-                             "dispatch_mode": "subagent",
-                             "worker_prompt": "stub"}]}
+                "jobs": [{"id": "c-1", "repo": self.tmp,
+                          "mode": "agent",
+                          "prompt": "stub"}]}
         pf = Path(self.tmp) / "plan.json"
         pf.write_text(json.dumps(plan), encoding="utf-8")
         return T.init_run(pf)

@@ -4,13 +4,12 @@
   "pool_size": 2,
   "stall_threshold_minutes": 45,
   "launch_grace_minutes": 10,
-  "entries": [
+  "jobs": [
     {
-      "task_id": "floor-a",
-      "target_repo": ".",
-      "dispatch_mode": "shell",
-      "worker_prompt": "floor stub floor-a",
-      "worker_cmd": [
+      "id": "floor-a",
+      "repo": ".",
+      "mode": "shell",
+      "command": [
         "python3",
         "{HARNESS_BIN}/demo_worker.py",
         "--heartbeat-path",
@@ -26,11 +25,10 @@
       ]
     },
     {
-      "task_id": "floor-b",
-      "target_repo": ".",
-      "dispatch_mode": "shell",
-      "worker_prompt": "floor stub floor-b",
-      "worker_cmd": [
+      "id": "floor-b",
+      "repo": ".",
+      "mode": "shell",
+      "command": [
         "python3",
         "{HARNESS_BIN}/demo_worker.py",
         "--heartbeat-path",
@@ -46,11 +44,10 @@
       ]
     },
     {
-      "task_id": "floor-c",
-      "target_repo": ".",
-      "dispatch_mode": "shell",
-      "worker_prompt": "floor stub floor-c",
-      "worker_cmd": [
+      "id": "floor-c",
+      "repo": ".",
+      "mode": "shell",
+      "command": [
         "python3",
         "{HARNESS_BIN}/demo_worker.py",
         "--heartbeat-path",

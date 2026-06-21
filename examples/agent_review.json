@@ -1,0 +1,14 @@
+{
+  "description": "A multi-repo in-session agent review. One format: a `jobs` list, each job `mode: \"agent\"` with a bare `prompt` (the engine auto-injects the placeholder preamble at dispatch). Edit each repo path and prompt, then `tick.py --check` and `--init`.",
+  "schema_version": "2",
+  "pool_size": 3,
+  "tick_interval_minutes": 5,
+  "jobs": [
+    {"id": "review-a", "repo": "/path/to/repo-a", "mode": "agent",
+     "prompt": "Review this repository for security issues and write a short summary of findings."},
+    {"id": "review-b", "repo": "/path/to/repo-b", "mode": "agent",
+     "prompt": "Review this repository for missing or weak test coverage."},
+    {"id": "review-c", "repo": "/path/to/repo-c", "mode": "agent",
+     "prompt": "Audit this repository's dependencies for known vulnerabilities."}
+  ]
+}

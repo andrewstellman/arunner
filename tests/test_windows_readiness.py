@@ -80,9 +80,9 @@ class StatusTableAsciiTests(unittest.TestCase):
         pf = Path(self._tmp.name) / "plan.json"
         pf.write_text(json.dumps({
             "tick_interval_minutes": 5, "pool_size": pool,
-            "entries": [{"task_id": f"t-{i}", "target_repo": "/tmp/x",
-                         "dispatch_mode": "subagent", "worker_prompt": "x"}
-                        for i in range(n)]}))
+            "jobs": [{"id": f"t-{i}", "repo": "/tmp/x",
+                      "mode": "agent", "prompt": "x"}
+                     for i in range(n)]}))
         return Path(T.init_run(pf))
 
     def _assert_ascii(self, table, label):

@@ -58,14 +58,14 @@ _FAST_WORKER = [
 
 def _plan(entries, **top):
     p = {"schema_version": "1", "tick_interval_minutes": 1, "pool_size": 2,
-         "entries": entries}
+         "jobs": entries}
     p.update(top)
     return p
 
 
 def _shell_entry(tid, cmd=None, auth_check=None):
-    e = {"task_id": tid, "target_repo": "/tmp/x", "dispatch_mode": "shell",
-         "worker_prompt": "p", "worker_cmd": cmd or list(_FAST_WORKER)}
+    e = {"id": tid, "repo": "/tmp/x", "mode": "shell",
+         "command": cmd or list(_FAST_WORKER)}
     if auth_check is not None:
         e["auth_check"] = auth_check
     return e
@@ -167,8 +167,8 @@ class OnceModeTests(unittest.TestCase):
     def test_subagent_entry_skipped_with_note(self):
         plan = self.tmp / "plan.json"
         plan.write_text(json.dumps(_plan(
-            [{"task_id": "t-1", "target_repo": "/tmp/x",
-              "dispatch_mode": "subagent", "worker_prompt": "p"}], pool_size=1)))
+            [{"id": "t-1", "repo": "/tmp/x",
+              "mode": "agent", "prompt": "p"}], pool_size=1)))
         rc = _run_ticker(plan, "--once", runs_dir=self.runs)
         self.assertIn("only launches shell workers", rc.stderr)
 

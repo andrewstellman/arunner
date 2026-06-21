@@ -14,3 +14,5 @@ runner/STATUS.md
 runner/STOP
 runner/.claude/
 runner/security-run-*.txt
+runner/runs/
+runner/20*Z/

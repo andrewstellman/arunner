@@ -206,33 +206,31 @@ class TailEndToEndTests(_Base):
 
 class SelectorTests(_Base):
     def test_selector_routes_wrap_and_tail(self):
-        wrap = TICK._adapter_worker_cmd({"adapter": "wrap", "command": ["c", "-x"]})
+        wrap = TICK._adapter_worker_cmd({"mode": "command", "command": ["c", "-x"]})
         self.assertEqual(wrap[2], "wrap")
         self.assertEqual(wrap[-3:], ["--", "c", "-x"])
         tail = TICK._adapter_worker_cmd(
-            {"adapter": "tail", "log_path": "/l.log", "success_regex": "OK"})
+            {"mode": "log", "log_path": "/l.log", "success_regex": "OK"})
         self.assertEqual(tail[2], "tail")
         self.assertIn("--log-file", tail); self.assertIn("/l.log", tail)
         self.assertIn("--lock-file", tail); self.assertIn("{LOCK_FILE}", tail)
         self.assertIn("--success-regex", tail)
-        self.assertIsNone(TICK._adapter_worker_cmd({"dispatch_mode": "shell"}))
+        self.assertIsNone(TICK._adapter_worker_cmd({"mode": "shell"}))
 
     def test_check_validates_adapter(self):
         d = str(self.tmp)
-        good = {"entries": [
-            {"task_id": "w", "target_repo": d, "dispatch_mode": "shell",
-             "adapter": "wrap", "command": ["echo", "hi"]},
-            {"task_id": "t", "target_repo": d, "dispatch_mode": "shell",
-             "adapter": "tail", "log_path": "/tmp/x.log"}]}
+        good = {"jobs": [
+            {"id": "w", "repo": d, "mode": "command", "command": ["echo", "hi"]},
+            {"id": "t", "repo": d, "mode": "log", "log_path": "/tmp/x.log"}]}
         gp = self.tmp / "good.json"; gp.write_text(json.dumps(good))
         self.assertEqual(TICK.check_plan(gp), [])
-        bad = {"entries": [
-            {"task_id": "w", "target_repo": d, "adapter": "rocket"},     # bad enum
-            {"task_id": "x", "target_repo": d, "adapter": "wrap"},       # missing command
-            {"task_id": "y", "target_repo": d, "adapter": "tail"}]}      # missing log_path
+        bad = {"jobs": [
+            {"id": "w", "repo": d, "mode": "rocket"},          # bad mode enum
+            {"id": "x", "repo": d, "mode": "command"},         # missing command
+            {"id": "y", "repo": d, "mode": "log"}]}            # missing log_path
         bp = self.tmp / "bad.json"; bp.write_text(json.dumps(bad))
         probs = TICK.check_plan(bp)
-        self.assertTrue(any("adapter" in p and "rocket" in p for p in probs))
+        self.assertTrue(any("mode" in p and "rocket" in p for p in probs))
         self.assertTrue(any("command" in p for p in probs))
         self.assertTrue(any("log_path" in p for p in probs))
 

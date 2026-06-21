@@ -37,7 +37,7 @@ CHECKER = _load("arunner_checker_j", "tests/integration/checker.py")
 def _drive_to_done(run_dir, env, max_ticks=6):
     """Tick (ticker --once) + settle on disk truth until done — the same
     deterministic loop the integration suite uses, no minute sleeps."""
-    entries = json.loads((run_dir / "plan.json").read_text()).get("entries", [])
+    entries = json.loads((run_dir / "plan.json").read_text()).get("jobs", [])
     for _ in range(max_ticks):
         subprocess.run([sys.executable, str(RUNNER._TICKER), "--once", str(run_dir)],
                        env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
@@ -68,9 +68,10 @@ class JourneyTests(unittest.TestCase):
         return dict(os.environ, ARUNNER_RUNS_DIR=runs)
 
     def _wrap_job_doc(self):
-        # a finite shell job via the FR-40 wrap adapter (completes on exit 0)
+        # a finite command-mode job (was the FR-40 wrap adapter; completes on
+        # exit 0)
         return {"pool_size": 1, "jobs": [
-            {"id": "build", "repo": str(self.tmp), "adapter": "wrap",
+            {"id": "build", "repo": str(self.tmp), "mode": "command",
              "command": ["python3", "-c", "print('built ok')"]}]}
 
     def _status_table(self, rd):
@@ -98,7 +99,7 @@ class JourneyTests(unittest.TestCase):
         # --- preview (FR-52 confirm gate): per-job dispatch + --check, no agent
         prc, pout = self._preview(jf)
         self.assertEqual(prc, 0)                                 # --check OK -> 'go'
-        self.assertIn("SHELL (wrap)", pout)                      # inferred dispatch echoed
+        self.assertIn("COMMAND", pout)                           # mode echoed in preview
         self.assertIn("--check: OK", pout)
 
         # --- run: expand -> --check -> --init (prepare; we drive deterministically)

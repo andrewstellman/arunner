@@ -4,13 +4,12 @@
   "pool_size": 2,
   "stall_threshold_minutes": 45,
   "launch_grace_minutes": 10,
-  "entries": [
+  "jobs": [
     {
-      "task_id": "demo-a",
-      "target_repo": ".",
-      "dispatch_mode": "shell",
-      "worker_prompt": "demo stub demo-a",
-      "worker_cmd": [
+      "id": "demo-a",
+      "repo": ".",
+      "mode": "shell",
+      "command": [
         "python3",
         "{HARNESS_BIN}/demo_worker.py",
         "--heartbeat-path",
@@ -26,11 +25,10 @@
       ]
     },
     {
-      "task_id": "demo-b",
-      "target_repo": ".",
-      "dispatch_mode": "shell",
-      "worker_prompt": "demo stub demo-b",
-      "worker_cmd": [
+      "id": "demo-b",
+      "repo": ".",
+      "mode": "shell",
+      "command": [
         "python3",
         "{HARNESS_BIN}/demo_worker.py",
         "--heartbeat-path",
@@ -46,11 +44,10 @@
       ]
     },
     {
-      "task_id": "demo-c",
-      "target_repo": ".",
-      "dispatch_mode": "shell",
-      "worker_prompt": "demo stub demo-c",
-      "worker_cmd": [
+      "id": "demo-c",
+      "repo": ".",
+      "mode": "shell",
+      "command": [
         "python3",
         "{HARNESS_BIN}/demo_worker.py",
         "--heartbeat-path",

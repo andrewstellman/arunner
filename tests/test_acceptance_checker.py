@@ -44,7 +44,7 @@ class AcceptancePlansCheck(unittest.TestCase):
         plans_dir = _ROOT / "tests" / "acceptance" / "plans"
         plans = [p for p in sorted(plans_dir.glob("*.json"))
                  if isinstance(json.loads(p.read_text(encoding="utf-8")), dict)
-                 and "entries" in json.loads(p.read_text(encoding="utf-8"))]
+                 and "jobs" in json.loads(p.read_text(encoding="utf-8"))]
         self.assertTrue(plans, "no acceptance plans found under %s" % plans_dir)
         for p in plans:
             problems = tick.check_plan(str(p))

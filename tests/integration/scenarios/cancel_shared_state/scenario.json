@@ -1,57 +1,92 @@
 {
   "description": "FR-39 CANCEL shared-state safety: run-01 is CANCELled while run-02 genuinely COMPLETES through the shared _synthesize_failure/_move_to_results path. The checker proves run-02's COMPLETED record is byte-identical before vs after the CANCEL (CANCEL touched only its own target), and that the CANCEL-freed pool slot back-fills the queued run-04. run-01/03/04 are HELD; run-02 is finite.",
   "plan": {
-    "schema_version": "1",
+    "schema_version": "2",
     "tick_interval_minutes": 1,
     "pool_size": 2,
     "stall_threshold_minutes": 45,
     "launch_grace_minutes": 10,
-    "entries": [
+    "jobs": [
       {
-        "task_id": "cancel-me",
-        "target_repo": "{SCENARIO_DIR}",
-        "dispatch_mode": "shell",
-        "worker_prompt": "stub run-01 (held, to be cancelled)",
-        "worker_cmd": [
-          "python3", "{STUB}", "--heartbeat", "{HEARTBEAT_PATH}",
-          "--task-id", "{TASK_ID}", "--run-dir", "{RUN_DIR}",
-          "--steps", "1", "--sleep", "0.2",
-          "--hold-file", "{RUN_DIR}/release_never"
+        "id": "cancel-me",
+        "repo": "{SCENARIO_DIR}",
+        "mode": "shell",
+        "command": [
+          "python3",
+          "{STUB}",
+          "--heartbeat",
+          "{HEARTBEAT_PATH}",
+          "--task-id",
+          "{TASK_ID}",
+          "--run-dir",
+          "{RUN_DIR}",
+          "--steps",
+          "1",
+          "--sleep",
+          "0.2",
+          "--hold-file",
+          "{RUN_DIR}/release_never"
         ]
       },
       {
-        "task_id": "complete-me",
-        "target_repo": "{SCENARIO_DIR}",
-        "dispatch_mode": "shell",
-        "worker_prompt": "stub run-02 (finite, genuinely completes)",
-        "worker_cmd": [
-          "python3", "{STUB}", "--heartbeat", "{HEARTBEAT_PATH}",
-          "--task-id", "{TASK_ID}", "--run-dir", "{RUN_DIR}",
-          "--steps", "1", "--sleep", "0.2"
+        "id": "complete-me",
+        "repo": "{SCENARIO_DIR}",
+        "mode": "shell",
+        "command": [
+          "python3",
+          "{STUB}",
+          "--heartbeat",
+          "{HEARTBEAT_PATH}",
+          "--task-id",
+          "{TASK_ID}",
+          "--run-dir",
+          "{RUN_DIR}",
+          "--steps",
+          "1",
+          "--sleep",
+          "0.2"
         ]
       },
       {
-        "task_id": "backfill-a",
-        "target_repo": "{SCENARIO_DIR}",
-        "dispatch_mode": "shell",
-        "worker_prompt": "stub run-03 (held)",
-        "worker_cmd": [
-          "python3", "{STUB}", "--heartbeat", "{HEARTBEAT_PATH}",
-          "--task-id", "{TASK_ID}", "--run-dir", "{RUN_DIR}",
-          "--steps", "1", "--sleep", "0.2",
-          "--hold-file", "{RUN_DIR}/release_never"
+        "id": "backfill-a",
+        "repo": "{SCENARIO_DIR}",
+        "mode": "shell",
+        "command": [
+          "python3",
+          "{STUB}",
+          "--heartbeat",
+          "{HEARTBEAT_PATH}",
+          "--task-id",
+          "{TASK_ID}",
+          "--run-dir",
+          "{RUN_DIR}",
+          "--steps",
+          "1",
+          "--sleep",
+          "0.2",
+          "--hold-file",
+          "{RUN_DIR}/release_never"
         ]
       },
       {
-        "task_id": "backfill-b",
-        "target_repo": "{SCENARIO_DIR}",
-        "dispatch_mode": "shell",
-        "worker_prompt": "stub run-04 (held, back-fills the CANCEL-freed slot)",
-        "worker_cmd": [
-          "python3", "{STUB}", "--heartbeat", "{HEARTBEAT_PATH}",
-          "--task-id", "{TASK_ID}", "--run-dir", "{RUN_DIR}",
-          "--steps", "1", "--sleep", "0.2",
-          "--hold-file", "{RUN_DIR}/release_never"
+        "id": "backfill-b",
+        "repo": "{SCENARIO_DIR}",
+        "mode": "shell",
+        "command": [
+          "python3",
+          "{STUB}",
+          "--heartbeat",
+          "{HEARTBEAT_PATH}",
+          "--task-id",
+          "{TASK_ID}",
+          "--run-dir",
+          "{RUN_DIR}",
+          "--steps",
+          "1",
+          "--sleep",
+          "0.2",
+          "--hold-file",
+          "{RUN_DIR}/release_never"
         ]
       }
     ]
@@ -72,6 +107,8 @@
       "completed": 1,
       "abandoned": 1
     },
-    "byte_identical_results": ["result-00002.json"]
+    "byte_identical_results": [
+      "result-00002.json"
+    ]
   }
 }

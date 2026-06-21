@@ -1,0 +1,59 @@
+{
+  "description": "FR-62/63/64 pipeline end-to-end through the ONE format (mode:\"pipeline\"): two sequential shell-dispatch steps in one pool slot. After step-01 reaps COMPLETED, a deterministic shell gate runs an argv and maps its EXIT CODE via the schema-folded `outcomes` map (0 -> continue), advancing to step-02. The whole job reaps COMPLETED. This is the all-modes-E2E guard for `pipeline`: if the engine mis-reads the step `mode`/`command` or the gate `outcomes`, the run never reaches done.",
+  "plan": {
+    "schema_version": "2",
+    "tick_interval_minutes": 1,
+    "pool_size": 1,
+    "stall_threshold_minutes": 45,
+    "launch_grace_minutes": 10,
+    "jobs": [
+      {
+        "id": "pipe-1",
+        "repo": "{SCENARIO_DIR}",
+        "mode": "pipeline",
+        "steps": [
+          {
+            "mode": "shell",
+            "label": "build",
+            "command": [
+              "python3", "{STUB}",
+              "--heartbeat", "{HEARTBEAT_PATH}",
+              "--task-id", "{TASK_ID}",
+              "--run-dir", "{RUN_DIR}",
+              "--steps", "1", "--sleep", "0.05"
+            ],
+            "gate": {
+              "kind": "shell",
+              "argv": ["python3", "-c", "import sys; sys.exit(0)"],
+              "outcomes": {"0": "continue", "1": "halt"}
+            }
+          },
+          {
+            "mode": "shell",
+            "label": "test",
+            "command": [
+              "python3", "{STUB}",
+              "--heartbeat", "{HEARTBEAT_PATH}",
+              "--task-id", "{TASK_ID}",
+              "--run-dir", "{RUN_DIR}",
+              "--steps", "1", "--sleep", "0.05"
+            ]
+          }
+        ]
+      }
+    ]
+  },
+  "control": {
+    "max_ticks": 10
+  },
+  "expected": {
+    "done": true,
+    "run_states": {
+      "run-01": "completed"
+    },
+    "counts": {
+      "completed": 1
+    },
+    "summary_present": true
+  }
+}

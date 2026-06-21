@@ -46,8 +46,9 @@ import arunner.cli as CLI
 
 
 def _wrap_entry(tid, msg="ok"):
-    return {"task_id": tid, "target_repo": ".", "dispatch_mode": "shell",
-            "adapter": "wrap", "command": ["python3", "-c", "print('%s')" % msg]}
+    # New collapsed format: a command-mode job (was adapter:"wrap").
+    return {"id": tid, "repo": ".", "mode": "command",
+            "command": ["python3", "-c", "print('%s')" % msg]}
 
 
 class _Base(unittest.TestCase):
@@ -75,7 +76,8 @@ class _Base(unittest.TestCase):
             encoding="utf-8")
 
     def _entries(self, rd):
-        return json.loads((rd / "plan.json").read_text())["entries"]
+        # runtime plan.json carries the expanded "jobs" table
+        return json.loads((rd / "plan.json").read_text())["jobs"]
 
     def _ack(self, rd, mid):
         return json.loads((rd / "outbox" / (mid + ".ack.json")).read_text())
@@ -99,21 +101,21 @@ class _Base(unittest.TestCase):
 class Idempotency(_Base):
 
     def test_replay_processed_id_is_a_noop(self):           # PIN
-        rd = self._init({"pool_size": 2, "entries": [_wrap_entry("a")]})
-        self._inbox(rd, "m1", "enqueue", {"entries": [_wrap_entry("b")]})
+        rd = self._init({"pool_size": 2, "jobs": [_wrap_entry("a")]})
+        self._inbox(rd, "m1", "enqueue", {"jobs": [_wrap_entry("b")]})
         TICK._drain_inbox(rd)
         self.assertEqual(len(self._entries(rd)), 2)
         self.assertEqual(self._ack(rd, "m1")["status"], "applied")
         # replay the SAME id -> idempotent no-op (no second dispatch)
-        self._inbox(rd, "m1", "enqueue", {"entries": [_wrap_entry("b")]})
+        self._inbox(rd, "m1", "enqueue", {"jobs": [_wrap_entry("b")]})
         TICK._drain_inbox(rd)
         self.assertEqual(len(self._entries(rd)), 2, "replay double-dispatched")
 
     def test_ledger_prevents_reapply(self):                 # PIN (crash-safety)
-        rd = self._init({"pool_size": 2, "entries": [_wrap_entry("a")]})
+        rd = self._init({"pool_size": 2, "jobs": [_wrap_entry("a")]})
         # simulate a crash AFTER the id was marked but BEFORE apply: pre-seed the
         # ledger, then drain -> the message must NOT apply (mark-first guarantee).
-        self._inbox(rd, "crash1", "enqueue", {"entries": [_wrap_entry("z")]})
+        self._inbox(rd, "crash1", "enqueue", {"jobs": [_wrap_entry("z")]})
         (rd / "inbox" / ".processed").write_text("crash1\n", encoding="utf-8")
         TICK._drain_inbox(rd)
         self.assertEqual(len(self._entries(rd)), 1, "re-applied a marked id")
@@ -123,8 +125,8 @@ class Idempotency(_Base):
 class UnderLockDrain(_Base):
 
     def test_drain_happens_through_the_locked_tick(self):
-        rd = self._init({"pool_size": 2, "entries": [_wrap_entry("a")]})
-        self._inbox(rd, "u1", "enqueue", {"entries": [_wrap_entry("b")]})
+        rd = self._init({"pool_size": 2, "jobs": [_wrap_entry("a")]})
+        self._inbox(rd, "u1", "enqueue", {"jobs": [_wrap_entry("b")]})
         self._tick(rd)                          # tick.py main holds the .tick.lock
         self.assertEqual(len(self._entries(rd)), 2)
         self.assertEqual(self._ack(rd, "u1")["status"], "applied")
@@ -133,9 +135,9 @@ class UnderLockDrain(_Base):
 class AckResultLifecycle(_Base):
 
     def test_enqueue_acked_and_completes_with_result(self):
-        rd = self._init({"pool_size": 2, "entries": [_wrap_entry("a")]})
+        rd = self._init({"pool_size": 2, "jobs": [_wrap_entry("a")]})
         self._inbox(rd, "e1", "enqueue",
-                    {"entries": [_wrap_entry("b"), _wrap_entry("c")]})
+                    {"jobs": [_wrap_entry("b"), _wrap_entry("c")]})
         final = self._drive(rd)
         self.assertTrue(final["done"])
         ack = self._ack(rd, "e1")
@@ -148,12 +150,11 @@ class AckResultLifecycle(_Base):
                             for s in result["run_states"].values()))
 
     def test_every_verb_yields_a_well_formed_ack(self):
-        rd = self._init({"pool_size": 2, "entries": [_wrap_entry("a")]})
-        self._inbox(rd, "v-enq", "enqueue", {"entries": [_wrap_entry("b")]})
-        self._inbox(rd, "v-dj", "dispatch-job",
-                    {"worker_prompt": "HEARTBEAT_PATH={HEARTBEAT_PATH} "
-                     "TASK_ID={TASK_ID} RUN_DIR={RUN_DIR} TARGET_REPO={TARGET_REPO} "
-                     "HARNESS_BIN={HARNESS_BIN} stub"})
+        rd = self._init({"pool_size": 2, "jobs": [_wrap_entry("a")]})
+        self._inbox(rd, "v-enq", "enqueue", {"jobs": [_wrap_entry("b")]})
+        # dispatch-job now carries a BARE prompt (args.prompt); the engine
+        # auto-injects the HEARTBEAT_PATH=... preamble at dispatch time.
+        self._inbox(rd, "v-dj", "dispatch-job", {"prompt": "stub"})
         self._inbox(rd, "v-ctl", "control", {"op": "pause"})
         self._inbox(rd, "v-snap", "snapshot", {})
         self._inbox(rd, "v-note", "note", {"text": "hello from chat"})
@@ -172,7 +173,7 @@ class AckResultLifecycle(_Base):
 class MalformedAndCheck(_Base):
 
     def test_unknown_verb_rejected_tick_continues(self):
-        rd = self._init({"pool_size": 2, "entries": [_wrap_entry("a")]})
+        rd = self._init({"pool_size": 2, "jobs": [_wrap_entry("a")]})
         self._inbox(rd, "bad-verb", "frobnicate", {})
         TICK._drain_inbox(rd)                    # must not raise
         self.assertEqual(self._ack(rd, "bad-verb")["status"], "rejected")
@@ -181,17 +182,19 @@ class MalformedAndCheck(_Base):
         self.assertTrue(self._drive(rd)["done"])
 
     def test_malformed_json_is_rejected(self):
-        rd = self._init({"pool_size": 2, "entries": [_wrap_entry("a")]})
+        rd = self._init({"pool_size": 2, "jobs": [_wrap_entry("a")]})
         (rd / "inbox").mkdir(exist_ok=True)
         (rd / "inbox" / "junk.json").write_text("{ not json", encoding="utf-8")
         TICK._drain_inbox(rd)                    # must not raise
         self.assertEqual(self._ack(rd, "junk")["status"], "rejected")
 
     def test_check_rejects_bad_entry_before_landing(self):
-        rd = self._init({"pool_size": 2, "entries": [_wrap_entry("a")]})
-        self._inbox(rd, "badent", "enqueue", {"entries": [
-            {"task_id": "x", "target_repo": ".", "dispatch_mode": "shell",
-             "adapter": "wrap", "command": "not-an-array"}]})
+        rd = self._init({"pool_size": 2, "jobs": [_wrap_entry("a")]})
+        # command mode requires command to be a non-empty array of strings;
+        # a string fails --check (per-mode required), so the spec never lands.
+        self._inbox(rd, "badent", "enqueue", {"jobs": [
+            {"id": "x", "repo": ".", "mode": "command",
+             "command": "not-an-array"}]})
         TICK._drain_inbox(rd)
         self.assertEqual(self._ack(rd, "badent")["status"], "rejected")
         self.assertEqual(len(self._entries(rd)), 1)   # bad spec never landed
@@ -204,7 +207,7 @@ class ReadOnlySafety(_Base):
         return (p.read_bytes(), st.st_mtime_ns, st.st_size)
 
     def test_readonly_verbs_never_write_run_state(self):    # PIN
-        rd = self._init({"pool_size": 2, "entries": [_wrap_entry("a")]})
+        rd = self._init({"pool_size": 2, "jobs": [_wrap_entry("a")]})
         self._inbox(rd, "ro-snap", "snapshot", {})
         self._inbox(rd, "ro-note", "note", {"text": "audit"})
         status_before = self._fingerprint(rd / "harness_status.json")
@@ -234,7 +237,7 @@ class ReadOnlySafety(_Base):
 class CliRoundTrip(_Base):
 
     def test_msg_send_check_gate_and_outbox(self):
-        rd = self._init({"pool_size": 2, "entries": [_wrap_entry("a")]})
+        rd = self._init({"pool_size": 2, "jobs": [_wrap_entry("a")]})
         # a malformed control is rejected BEFORE send (send-side --check)
         rc = CLI.main(["msg", str(rd), "control", "--op", "cadence"])
         self.assertEqual(rc, 1)
@@ -242,7 +245,7 @@ class CliRoundTrip(_Base):
                          and list((rd / "inbox").glob("*.json")))
         # a good enqueue from a file lands and acks applied
         f = self.runs / "jobs.json"
-        f.write_text(json.dumps({"entries": [_wrap_entry("b")]}), encoding="utf-8")
+        f.write_text(json.dumps({"jobs": [_wrap_entry("b")]}), encoding="utf-8")
         rc = CLI.main(["msg", str(rd), "enqueue", "--file", str(f)])
         self.assertEqual(rc, 0)
         self.assertEqual(len(list((rd / "inbox").glob("*.json"))), 1)

@@ -80,15 +80,18 @@ size / cadence** if they care (else defaults).
 
 | The job is… | Use | Form |
 |---|---|---|
-| an AI agent working **inside this session** (rung 1) | `dispatch_mode: subagent` | a `prompt` |
-| a command **arunner launches** (test/build/script, any CLI) | `adapter: "wrap"` | a `command` |
-| a process **something else launches** that writes its own log | `adapter: "tail"` | a `log_path` (+ optional `success_regex`/`failure_regex`/`sentinel_file`) |
-| a host-CLI agent you invoke by argv yourself (advanced) | `dispatch_mode: shell` | a `worker_cmd` |
+| an AI agent working **inside this session** (rung 1) | `mode: "agent"` | a `prompt` (or `prompt_file`) |
+| a command **arunner launches** (test/build/script, any CLI) | `mode: "command"` | a `command` |
+| a process **something else launches** that writes its own log | `mode: "log"` | a `log_path` (+ optional `success_regex`/`failure_regex`/`sentinel_file`) |
+| an ordered multi-step run with gates | `mode: "pipeline"` | `steps` |
+| a host-CLI agent you invoke by raw argv yourself (advanced escape hatch) | `mode: "shell"` | a `command` (you wire the heartbeat) |
 
-Rule of thumb: **subagent** when this session does the work; **wrap** when
-arunner owns the launch; **tail** when something else does. Prefer `wrap`/
-`tail` over a hand-written `worker_cmd` — the adapter wires the heartbeat
-plumbing for you.
+Rule of thumb: **agent** when this session does the work; **command** when
+arunner owns the launch (it synthesizes the heartbeat plumbing — doneness =
+exit code); **log** when something else owns the launch and writes a log.
+Prefer `command`/`log` over `shell` — in `command`/`log` the engine guarantees
+the heartbeat; in `shell` you wire it yourself (and can forget it — the false-
+stall footgun, which is why `shell` is its own visibly-distinct mode).
 
 > **Why subagent is the default for *agent* work — and the one anti-pattern to refuse.**
 > Subagent dispatch is the **reason this mode exists**: when a step's job is "drive an
@@ -108,34 +111,35 @@ plumbing for you.
 > (rungs 2–4). They are not for relaunching the agent itself. If you catch a plan
 > shelling the agent per step, convert it to a subagent multi-step entry.
 
-**Step 3 — choose the form.** Default to the **`jobs:` shorthand** (one line
-per job; the expander injects placeholders and adapter plumbing). Drop to the
-**full plan** only when you need a field the shorthand doesn't expose. Either
-way the engine consumes the same canonical `plan.json`.
+**Step 3 — there is one format.** A plan is a single `jobs:` list; each job has
+`id`, `repo`, `mode`, and that mode's one field. No dialects, no expand step
+required. (An optional `defaults:` block is merged under every job, and
+`arunner/engine/jobs.py expand` will fill those defaults + the agent preamble if
+you want the concrete plan on disk — but the engine reads the friendly shape
+directly.)
 
 **Step 4 — write it, never hand-writing paths.** The engine substitutes
 `{HEARTBEAT_PATH}`/`{TASK_ID}`/`{RUN_DIR}`/`{TARGET_REPO}`/`{HARNESS_BIN}` at
 dispatch. **Never** ask the model to fill a real path into a prompt (FR-21a — a
-hand-copied path once silently killed a job). In the shorthand you don't write
-placeholders at all; in a full subagent `worker_prompt` use the placeholder
-tokens verbatim.
+hand-copied path once silently killed a job). For an `agent` job you write a
+**bare** prompt — the engine **auto-injects** the placeholder preamble, so you
+never hand-type placeholders at all. (Only a `shell` job's raw `command` must
+carry `{HEARTBEAT_PATH}` itself.)
 
-**Step 5 — expand + pre-flight, always.** If you wrote shorthand, expand it;
-then `--check` before launching:
+**Step 5 — pre-flight, always.** `--check` before launching:
 
 ```bash
-python3 arunner/engine/jobs.py expand my_jobs.json > plan.json   # shorthand -> canonical
 python3 arunner/engine/tick.py --check plan.json                  # validate -- fix every problem it lists
 ```
 
-`--check` reports **all** problems at once (missing fields, a bad
-`dispatch_mode`, a missing placeholder, a non-existent `target_repo`, an
-unknown `adapter`) and exits nonzero. A clean `--check` is the green light to
-`--init` and run. See the worked example at the end of this file.
+`--check` reports **all** problems at once (missing per-mode fields, an unknown
+`mode`, a typo'd key, a non-existent `repo`) and exits nonzero. A clean `--check`
+is the green light to `--init` and run. See the worked example at the end of
+this file.
 
 ## Writing a plan
 
-A plan is one JSON file. Top-level knobs (all optional except `entries`):
+A plan is one JSON file. Top-level knobs (all optional except `jobs`):
 
 | Field | Default | Meaning |
 |---|---|---|
@@ -144,119 +148,118 @@ A plan is one JSON file. Top-level knobs (all optional except `entries`):
 | `stall_threshold_minutes` | 45 | A job whose heartbeat is older than this is marked `stalled`. |
 | `launch_grace_minutes` | 10 | A claimed job that emits no heartbeat within this is marked `LAUNCH-FAIL`. |
 | `idle_tick_multiplier` | 1 | Lengthens the cadence when nothing is actively running. |
-| `entries` | — | The list of jobs (one run per entry). Required. |
+| `defaults` | — | Optional map shallow-merged **under** each job (a job's own key wins). |
+| `description` / `_comment` | — | Optional annotation (sanctioned at plan/job/step; never interpreted). |
+| `jobs` | — | The list of jobs (one run per job). Required. |
 
-Each **entry**:
+Each **job** carries `id`, `repo`, `mode`, plus that mode's field:
 
-| Field | Required | Meaning |
+| Field | Required for | Meaning |
 |---|---|---|
-| `task_id` | yes | Stable id (a UUID is recommended); threaded into the heartbeat and result. |
-| `target_repo` | yes | Absolute path the worker operates on. Never cwd-derived. |
-| `dispatch_mode` | yes | `"subagent"` (in-session agent, rung 1) or `"shell"` (detached host-CLI process, rungs 2–4). |
-| `worker_prompt` | yes | The worker prompt. Contains placeholders the engine substitutes mechanically (below). |
-| `worker_cmd` | shell only | The argv template the ticker runs detached. Tokens may carry the placeholders + `{PROMPT_FILE}`. |
-| `auth_check` | shell, optional | A cheap argv run once before the first shell dispatch to confirm the CLI is present + authed (else `LAUNCH-FAIL`). |
+| `id` | all | Stable id (a UUID is recommended); threaded into the heartbeat and result. |
+| `repo` | all | Absolute path the worker operates on. Never cwd-derived. |
+| `mode` | all | The discriminator: `agent` / `command` / `log` / `pipeline` / `shell`. |
+| `prompt` / `prompt_file` | `agent` | The bare worker prompt (the engine auto-injects the placeholder preamble), inline or from a file. |
+| `command` | `command`, `shell` | `command` mode: the argv arunner runs+watches (doneness = exit code; heartbeat synthesized). `shell` mode: the **raw** argv you wire yourself (must carry `{HEARTBEAT_PATH}`). |
+| `log_path` | `log` | The log a job writes; arunner watches it (+ optional `success_regex`/`failure_regex`/`sentinel_file`/`pid`; optional `command` if arunner also launches it). |
+| `steps` | `pipeline` | Ordered sub-runs in one pool slot, each its own `mode`, with optional `gate`s. |
+| `auth_check` | `command`/`shell`, optional | A cheap argv run once before dispatch to confirm the CLI is present + authed (else `LAUNCH-FAIL`). |
 | `heartbeat_path` | optional | An absolute path to a status file the job **already** writes — point the harness at it instead of the run-dir default. |
 
 **Placeholders (substituted by the engine before dispatch — you never type a
 real path):** `{HEARTBEAT_PATH}`, `{TASK_ID}`, `{RUN_DIR}`, `{TARGET_REPO}`,
-`{HARNESS_BIN}` (the harness's own bin directory), and `{PROMPT_FILE}` (shell
-mode — the per-job prompt file). **Never** write a prompt that asks the model
-to "replace `<X>` with the path to…": that transcription hazard once
-silently killed a job (a hallucinated username in a hand-copied path). Always
-use a placeholder.
+`{HARNESS_BIN}` (the harness's own bin directory), and `{PROMPT_FILE}` (the
+per-job prompt file). For an `agent` job the engine prepends these as a preamble
+automatically — write a bare prompt. **Never** write a prompt that asks the model
+to "replace `<X>` with the path to…": that transcription hazard once silently
+killed a job (a hallucinated username in a hand-copied path). Always use a
+placeholder.
 
-### Annotated example (both dispatch modes + an external heartbeat file)
+### Annotated example (every mode + an external heartbeat file)
 
 ```json
 {
-  "schema_version": "1",
+  "schema_version": "2",
   "tick_interval_minutes": 5,
   "pool_size": 2,
-  "stall_threshold_minutes": 45,
-  "launch_grace_minutes": 10,
-  "entries": [
+  "defaults": { "repo": "/abs/path/repo-a" },
+  "description": "one annotated plan covering each mode",
+  "jobs": [
     {
-      "task_id": "11111111-1111-1111-1111-111111111111",
-      "target_repo": "/abs/path/repo-a",
-      "dispatch_mode": "subagent",
-      "worker_prompt": "TASK_ID={TASK_ID} RUN_DIR={RUN_DIR} TARGET_REPO={TARGET_REPO}\nHEARTBEAT_PATH={HEARTBEAT_PATH}\n\nDo the work on {TARGET_REPO}. Emit heartbeats to {HEARTBEAT_PATH} (see the worker contract). Return one line."
+      "id": "11111111-1111-1111-1111-111111111111",
+      "mode": "agent",
+      "_comment": "repo comes from defaults; the prompt is bare — the engine injects the placeholder preamble.",
+      "prompt": "Do the work on this repository. Return one line."
     },
     {
-      "task_id": "22222222-2222-2222-2222-222222222222",
-      "target_repo": "/abs/path/repo-b",
-      "dispatch_mode": "shell",
-      "worker_prompt": "Audit {TARGET_REPO}. Heartbeat to {HEARTBEAT_PATH}; task {TASK_ID}.",
-      "worker_cmd": ["claude", "--print", "--model", "sonnet",
-                     "--append-system-prompt", "$(cat {PROMPT_FILE})"],
-      "auth_check": ["claude", "--version"]
+      "id": "22222222-2222-2222-2222-222222222222",
+      "repo": "/abs/path/repo-b",
+      "mode": "command",
+      "command": ["pytest", "-q"],
+      "auth_check": ["pytest", "--version"]
     },
     {
-      "task_id": "33333333-3333-3333-3333-333333333333",
-      "target_repo": "/abs/path/repo-c",
-      "dispatch_mode": "shell",
-      "worker_prompt": "Run the existing job on {TARGET_REPO}.",
-      "worker_cmd": ["python3", "{HARNESS_BIN}/your_worker.py", "--repo", "{TARGET_REPO}"],
-      "heartbeat_path": "/abs/path/repo-c/.status/heartbeat.ndjson"
+      "id": "33333333-3333-3333-3333-333333333333",
+      "repo": "/abs/path/repo-c",
+      "mode": "log",
+      "log_path": "/abs/path/repo-c/build.log",
+      "success_regex": "BUILD OK", "failure_regex": "BUILD FAILED"
+    },
+    {
+      "id": "44444444-4444-4444-4444-444444444444",
+      "repo": "/abs/path/repo-d",
+      "mode": "shell",
+      "command": ["python3", "{HARNESS_BIN}/your_worker.py", "--repo", "{TARGET_REPO}", "--hb", "{HEARTBEAT_PATH}"],
+      "heartbeat_path": "/abs/path/repo-d/.status/heartbeat.ndjson"
     }
   ]
 }
 ```
 
-A `subagent` entry is run by an in-session agent (rung 1 only). A `shell`
-entry is run by the ticker as a detached process (rungs 2–4). The third entry
-points the harness at a status file the job already maintains, with no change
-to the job.
+An `agent` job is run by an in-session agent (rung 1 only). `command`/`log` jobs
+are run by the ticker as detached processes (rungs 2–4) with the heartbeat
+plumbing synthesized for you. The last job is `shell` mode — the raw-argv escape
+hatch where **you** wire the heartbeat (`{HEARTBEAT_PATH}` in the `command`); it
+also points the harness at a status file the job already maintains.
 
-## The `jobs:` shorthand (the quick form)
+## The per-mode `command` contract (read this)
 
-Most plans don't need the full entry shape. The **`jobs:` shorthand** is a
-higher-level form the expander (`arunner/engine/jobs.py`) turns into the canonical
-`plan.json` — injecting the placeholders and adapter plumbing so the result
-passes `--check`. The engine only ever sees the expanded plan; the shorthand is
-pure convenience (the low-level schema stays canonical).
+`command` appears in three modes — the contract differs, and the docs state it
+so the difference is legible:
 
-Each job in `jobs:` is one of:
+- **`command` mode:** the engine **synthesizes** the heartbeat plumbing around
+  your `command` (doneness = exit code). You wire nothing. Use this for a
+  test/build/script arunner launches.
+- **`log` mode (optional `command`):** arunner **launches** the process that
+  writes `log_path` (vs. just watching a log something else already writes).
+- **`shell` mode:** `command` is the **raw argv** the engine Popens detached, and
+  **you** are responsible for emitting the heartbeat (the `command` must carry
+  `{HEARTBEAT_PATH}`). This is the advanced escape hatch — kept a distinct mode
+  so the "you can forget the heartbeat" footgun stays visible.
 
-```jsonc
-{ "repo": "/abs/repo-a", "agent": "subagent", "prompt": "Review for security bugs." }
-{ "repo": "/abs/repo-b", "adapter": "wrap", "command": ["pytest", "-q"] }
-{ "repo": "/abs/repo-c", "adapter": "tail", "log_path": "/abs/repo-c/build.log",
-  "success_regex": "BUILD OK", "failure_regex": "BUILD FAILED" }
-```
+## `command` / `log` modes: turn any command or log into a job
 
-Top-level knobs (`pool_size`, `tick_interval_minutes`, …) sit beside `jobs:` and
-pass through. Add an `"id"` to a job to set its `task_id` (else `job-NN`).
-Expand with `python3 arunner/engine/jobs.py expand my_jobs.json > plan.json`. Ready-to-edit
-templates live in **`examples/`** (`agent_review`, `shell_jobs`, `mixed`,
-`wrap_vs_tail`, plus a `canonical_plan`); each one expands to a `--check`-clean
-plan.
+These make a non-AI job a conformant worker with **no change to the command**:
 
-## Adapters: turn any command or log into a job (`wrap` / `tail`)
-
-An adapter makes a non-AI job a conformant worker with **no change to the
-command**:
-
-- **`wrap`** — arunner launches your `command` as a child, captures its
+- **`command`** — arunner launches your `command` as a child, captures its
   stdout+stderr, emits keepalives, and reports **COMPLETED/FAILED straight from
   the exit code** (never by parsing output). Use when arunner owns the launch.
-- **`tail`** — arunner watches a `log_path` a job already writes, surfaces its
+- **`log`** — arunner watches a `log_path` a job already writes, surfaces its
   latest line as the activity, and decides doneness by **precedence**: an
   optional `success_regex`/`failure_regex`/`sentinel_file` overlay (for jobs
   that signal only in their log), then the authoritative process exit (default
   COMPLETED on a clean exit). Use when something else owns the launch.
 
-In the shorthand you just set `adapter` + its command/log; the engine
-synthesizes the `heartbeat.py wrap|tail …` invocation. (Under the hood that's
-the `adapter` field on a `shell` entry — you never wire it by hand.)
+You just set the `mode` + its command/log; the engine synthesizes the
+`heartbeat.py wrap|tail …` invocation under the hood — you never wire it by hand.
 
 ## Pre-flight: always `--check` before launching
 
 `python3 arunner/engine/tick.py --check <plan>` validates a plan **before** you spend
-anything — schema, required placeholders, `target_repo` existence, the adapter
-config — and reports every problem at once. Make it a habit: **expand →
-`--check` → `--init` → run.** A reactive `LAUNCH-FAIL` after spend is exactly
-what the pre-flight prevents.
+anything — per-mode required fields, an unknown `mode`, a typo'd key
+(strict keys), `repo` existence — and reports every problem at once. Make it a
+habit: **`--check` → `--init` → run.** A reactive `LAUNCH-FAIL` after spend is
+exactly what the pre-flight prevents.
 
 ## Choosing a rung (which entry point?)
 
@@ -264,20 +267,20 @@ Ask, in order:
 
 1. **Inside an agent session with a timer (Claude Code with `ScheduleWakeup`)?**
    Paste the bootstrap prompt (`references/BOOTSTRAP_PROMPT.md`) — the session
-   drives the run. **Use `subagent` entries.** Keep the session open. *Pair
+   drives the run. **Use `agent` jobs.** Keep the session open. *Pair
    with a safety tick (troubleshooting).*
 2. **No session, but you can add a cron/Task-Scheduler/launchd entry?**
    Install the printed `arunner-ticker --once <run-dir>` schedule at the
-   plan cadence. **Use `shell` entries.** No window stays open.
+   plan cadence. **Use `command`/`log`/`shell` jobs.** No window stays open.
 3. **No scheduler rights (locked-down machine)?** Run
    `arunner-ticker <plan.json>` in a terminal — the foreground loop. **Use
-   `shell` entries.** The window stays open for the run.
+   `command`/`log`/`shell` jobs.** The window stays open for the run.
 4. **Can't keep a window open?** Run `arunner-ticker --once <run-dir>` by
    hand whenever convenient; each call is one safe tick. Every failure path
    prints this exact command.
 
-The ticker runs **`shell` entries only** — a `subagent` entry it encounters
-is reported and skipped with the rung-1 instruction.
+The ticker runs **detached-process jobs only** (`command`/`log`/`shell`) — an
+`agent` job it encounters is reported and skipped with the rung-1 instruction.
 
 ## Interactive build — describe a run in plain language (FR-52)
 
@@ -293,47 +296,48 @@ builder-driving orchestrators.)
 
 **The 5-step loop the agent follows:**
 
-1. **Describe → assemble.** Turn the request into a `jobs:` shorthand, picking
-   each job's dispatch with the **intent precedence ladder** (per job, not per
+1. **Describe → assemble.** Turn the request into a `jobs:` plan, picking
+   each job's `mode` with the **intent precedence ladder** (per job, not per
    request):
-   1. **explicit operator override** ("make job 2 shell") — honor it;
+   1. **explicit operator override** ("make job 2 a command") — honor it;
    2. else the target is **readable as instructions** (a `.md`/`.txt`/`.prompt`
-      file, or an inline prompt) ⇒ **subagent**; read the file's contents as the
-      worker prompt;
+      file, or an inline prompt) ⇒ **`agent`**; read the file's contents as the
+      prompt (or use `prompt_file`);
    3. else the target **resolves to a runnable command** (an executable / a
-      command ± args) ⇒ **shell**, wrapping the full command via `adapter:"wrap"`;
+      command ± args) ⇒ **`command`** (arunner launches+watches it);
    4. else **ask a clarifying question — never guess.**
 
    One `jobs:` list may mix modes. Resolved-vs-ask:
 
-   | The operator names… | Resolves to | Dispatch |
+   | The operator names… | Resolves to | Mode |
    |---|---|---|
-   | a `.md` / `.txt` / `.prompt` file, or an inline instruction | instructions | **subagent** (file contents → prompt) |
-   | an executable / a shell command (± args) | a runnable command | **shell** (`adapter:"wrap"`) |
-   | "...as a subagent" / "...as shell" | explicit override | as stated |
+   | a `.md` / `.txt` / `.prompt` file, or an inline instruction | instructions | **`agent`** (file contents → prompt) |
+   | an executable / a shell command (± args) | a runnable command | **`command`** |
+   | a log something else writes | a watched log | **`log`** |
+   | "...as an agent" / "...as a command" | explicit override | as stated |
    | something ambiguous ("run the thing") | — | **ASK**, don't guess |
 
-2. **Preview → confirm.** Run `python -m arunner preview <shorthand>` — it
-   echoes, **per job**, the inferred dispatch mode + source and the `--check`
-   verdict (e.g. `job 2 [build]: SHELL (wrap)  wraps: ./build.sh`). If `--check`
+2. **Preview → confirm.** Run `python -m arunner preview <plan>` — it
+   echoes, **per job**, the `mode` + source and the `--check` verdict (e.g.
+   `job 2 [build]: COMMAND  runs: ./build.sh`). If `--check`
    FAILS, there is **no "go"** — surface the errors for editing. A confirmation
    is valid only for the *exact* previewed plan.
-3. **Run.** `arunner run <shorthand>` (expand → `--check` → `--init` → tick).
+3. **Run.** `arunner run <plan>` (`--check` → `--init` → tick).
 4. **Persist on request.** "save that to my_run.json" → `arunner expand
-   <shorthand> --save my_run.json` (writes the `jobs:` source + the expanded
-   `plan:`); `arunner run my_run.json` reruns it faithfully.
+   <plan> --save my_run.json` (writes the source + the filled `plan:`);
+   `arunner run my_run.json` reruns it faithfully.
 5. **Incremental edit (before launch).** Any edit — "add a fourth job", "pool
-   3", "make job 2 shell" — returns to the **unconfirmed** state: re-`preview`,
-   re-`--check`, fresh "go". (Injecting work into a *running* batch is the
-   streaming queue, FR-47, not this.)
+   3", "make job 2 a command" — returns to the **unconfirmed** state:
+   re-`preview`, re-`--check`, fresh "go". (Injecting work into a *running*
+   batch is the streaming queue, FR-47, not this.)
 
-Two worked cases live in `examples/`: `uc10_three_md_reviews.jobs.json` (three
-`.md` tasks → subagents, pool 2) and `uc10_four_exes.jobs.json` (four
-executables → wrapped shell jobs, pool 3).
+Two worked cases live in `examples/`: `uc10_three_md_reviews.json` (three
+`.md` tasks → `agent` jobs, pool 2) and `uc10_four_exes.json` (four
+executables → `command` jobs, pool 3).
 
 ## In-context mode (dispatch-to-self)
 
-A third dispatch option (FR-46), beyond subagent and shell: the orchestrator can
+A third dispatch option (FR-46), beyond the agent and detached-process rungs: the orchestrator can
 do tasks **itself**, in its own context, between ticks. Enable it with an
 `instruction_folder` setting at bootstrap — the agent then watches that folder
 and processes the **lowest-numbered `NNN-` instruction with no matching output**
@@ -482,30 +486,28 @@ skips a malformed line with a warning rather than dying.
 **The operator says:** *"Review repo-a and repo-b for bugs with an in-session
 agent, and run the test suite in repo-c."*
 
-**You write the `jobs:` shorthand** (`examples/toolkit_walkthrough.jobs.json`) —
-two subagent reviews + one wrapped shell command, no placeholders typed by hand:
+**You write the plan** (`examples/toolkit_walkthrough.json`) — two `agent`
+reviews + one `command` job, no placeholders typed by hand:
 
 ```json
 {
   "pool_size": 2,
   "tick_interval_minutes": 5,
   "jobs": [
-    {"id": "review-a", "repo": "/abs/repo-a", "agent": "subagent",
+    {"id": "review-a", "repo": "/abs/repo-a", "mode": "agent",
      "prompt": "Review this repository for bugs and risky patterns; summarize the findings."},
-    {"id": "review-b", "repo": "/abs/repo-b", "agent": "subagent",
+    {"id": "review-b", "repo": "/abs/repo-b", "mode": "agent",
      "prompt": "Review this repository for missing or weak test coverage."},
-    {"id": "tests-c", "repo": "/abs/repo-c", "adapter": "wrap",
+    {"id": "tests-c", "repo": "/abs/repo-c", "mode": "command",
      "command": ["pytest", "-q"]}
   ]
 }
 ```
 
-**Expand it.** `python3 arunner/engine/jobs.py expand examples/toolkit_walkthrough.jobs.json`
-produces the canonical plan: each subagent job becomes an entry whose
-`worker_prompt` carries the injected placeholder header
-(`HEARTBEAT_PATH={HEARTBEAT_PATH}` … `HARNESS_BIN={HARNESS_BIN}`) followed by
-the prompt; the `wrap` job becomes a `shell` entry with `adapter: "wrap"` and
-the command — the engine synthesizes its `heartbeat.py wrap …` invocation.
+The engine reads this directly. Each `agent` job's bare prompt gains the
+injected placeholder preamble (`HEARTBEAT_PATH={HEARTBEAT_PATH}` …
+`HARNESS_BIN={HARNESS_BIN}`) at dispatch; the `command` job has its
+`heartbeat.py wrap …` invocation synthesized — you wire nothing.
 
 **Pre-flight.** `python3 arunner/engine/tick.py --check plan.json`, once the repo paths
 point at real directories, prints:
@@ -519,7 +521,7 @@ Then `--init` and run at your chosen rung. If anything is wrong it prints
 reports them all at once) and exits nonzero — fix every one.
 
 > The repo paths above are placeholders to edit. `--check` requires each
-> `target_repo` to be a real directory; everything else (schema, the injected
-> placeholders, the adapter config) validates as written. The `examples/`
+> `repo` to be a real directory; everything else (schema, the per-mode required
+> fields, the strict keys) validates as written. The `examples/`
 > templates are bound to `--check` in the test suite, so this walkthrough can't
 > silently drift from what the engine accepts.

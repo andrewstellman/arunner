@@ -79,12 +79,17 @@ def _kill_workers(run_dir: Path):
             pass
 
 
-def _heartbeat_terminal(run_dir, name):
+def _heartbeat_terminal(run_dir, name, rec=None):
     """True once a run's worker has written a terminal heartbeat -- detected by
     the STATUS FIELD (JSON-parsed), mirroring the engine's _terminal_status_of.
     Never a substring scan: an adapter's free-text label (a wrapped build that
-    prints 'FAILED') must not look terminal to the settle loop."""
-    hb = Path(run_dir) / name / "heartbeat.ndjson"
+    prints 'FAILED') must not look terminal to the settle loop. For a `pipeline`
+    run the watched heartbeat is the CURRENT step's, not run-NN/heartbeat.ndjson."""
+    if rec and rec.get("step_count"):
+        m = int(rec.get("step_index", 0))
+        hb = Path(run_dir) / name / "steps" / ("step-%02d" % (m + 1)) / "heartbeat.ndjson"
+    else:
+        hb = Path(run_dir) / name / "heartbeat.ndjson"
     try:
         text = hb.read_text(encoding="utf-8", errors="replace")
     except OSError:
@@ -112,7 +117,7 @@ def _settle(run_dir, entries, timeout=20.0):
     blanket sleep). On timeout we proceed (the tick handles whatever exists)."""
     held = set()
     for i, e in enumerate(entries, start=1):
-        if "--hold-file" in (e.get("worker_cmd") or []):
+        if "--hold-file" in (e.get("command") or []):
             held.add("run-%02d" % i)
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
@@ -122,7 +127,7 @@ def _settle(run_dir, entries, timeout=20.0):
         pending = [name for name, r in status.get("runs", {}).items()
                    if name not in held
                    and r.get("state") in ("claimed", "running")
-                   and not _heartbeat_terminal(run_dir, name)]
+                   and not _heartbeat_terminal(run_dir, name, r)]
         if not pending:
             return
         time.sleep(0.05)
@@ -269,7 +274,7 @@ def run_scenario(scenario_dir, work_dir):
         # completion rather than racing a fixed tick budget against
         # process-startup speed. Held-open workers are excluded (they never
         # terminate). No-op when nothing is in-flight.
-        _settle(run_dir, plan.get("entries", []))
+        _settle(run_dir, plan.get("jobs", []))
 
         if status.get("done"):
             # FR-55 `honor`: the host yields legitimately at the done tick.

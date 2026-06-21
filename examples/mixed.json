@@ -1,0 +1,11 @@
+{
+  "description": "A mixed plan: an in-session `agent` review alongside a `command` job. Pool 2 runs them concurrently.",
+  "schema_version": "2",
+  "pool_size": 2,
+  "jobs": [
+    {"id": "review", "repo": "/path/to/repo-a", "mode": "agent",
+     "prompt": "Review this repository for bugs and risky patterns."},
+    {"id": "tests", "repo": "/path/to/repo-b", "mode": "command",
+     "command": ["pytest", "-q", "tests/"]}
+  ]
+}

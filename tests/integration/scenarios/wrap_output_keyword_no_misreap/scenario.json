@@ -1,22 +1,20 @@
 {
   "description": "FR-40 doneness-is-exit-code-only (end-to-end regression for a Council finding): a wrapped command that PRINTS a terminal keyword ('build FAILED: 3 tests failed') but EXITS 0 must be reaped COMPLETED. The engine detects terminals by the heartbeat status FIELD, never by substring-scanning the adapter's free-text output label.",
   "plan": {
-    "schema_version": "1",
+    "schema_version": "2",
     "tick_interval_minutes": 1,
     "pool_size": 1,
     "stall_threshold_minutes": 45,
     "launch_grace_minutes": 10,
-    "entries": [
+    "jobs": [
       {
-        "task_id": "wrap-kw",
-        "target_repo": "{SCENARIO_DIR}",
-        "dispatch_mode": "shell",
-        "worker_prompt": "wrap demo carrying {HEARTBEAT_PATH}",
-        "worker_cmd": [
-          "python3", "{HEARTBEAT_BIN}", "wrap",
-          "--task-id", "{TASK_ID}",
-          "--heartbeat-path", "{HEARTBEAT_PATH}",
-          "--", "python3", "-c", "print('build FAILED: 3 tests failed'); import sys; sys.exit(0)"
+        "id": "wrap-kw",
+        "repo": "{SCENARIO_DIR}",
+        "mode": "command",
+        "command": [
+          "python3",
+          "-c",
+          "print('build FAILED: 3 tests failed'); import sys; sys.exit(0)"
         ]
       }
     ]
