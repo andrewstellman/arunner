@@ -77,7 +77,16 @@ pipx install arunner            # Python 3.10+ (recommended)
 pip install --user arunner
 # or, secondary channel — a thin launcher that execs the Python CLI:
 npm install arunner
+# optional: add the interactive read-only TUI (pulls in Textual):
+pip install 'arunner[tui]'
 ```
+
+> **The engine is stdlib; the TUI is an optional decoupled viewer.** The bare
+> `arunner` install has **zero runtime dependencies** (NFR-3) — the whole
+> engine, ticker, heartbeat helper, and the `arunner monitor` sidecar are pure
+> Python stdlib. The `[tui]` extra is the *only* thing that pulls in a
+> third-party package (Textual), and it's imported lazily, so a bare install
+> never loads it and `arunner monitor` stays the always-available fallback.
 
 > **v0.1.0 installs three real console commands:** `arunner` (the lifecycle CLI —
 > `run`/`status`/`stop`/`resume`/`summary`/`preview`/`expand`), `arunner-ticker`
@@ -289,6 +298,35 @@ heartbeat older than the threshold) is non-terminal and recoverable. A job
 that's claimed but never heartbeats past the launch grace becomes
 `LAUNCH-FAIL` (displayed; `auth_or_launch_failed` on disk) and carries a
 diagnostic hint in both the result record and the table (FR-21b).
+
+### Watch a run from a second terminal (read-only viewers)
+
+Because the whole run lives on disk, *display* is just another consumer — and
+a viewer can never race the engine, because it only reads. Two read-only
+sidecars, both safe to run alongside a live engine on any rung (they write
+nothing — no run-state, no `.tick.lock`, no control file, no tick):
+
+```bash
+arunner monitor <run-dir>       # stdlib, zero-dependency — re-renders the table on an interval (FR-59)
+arunner tui [<run-dir>]         # optional [tui] extra — interactive (FR-62)
+```
+
+- **`arunner monitor`** (FR-59) is the always-available, **stdlib** fallback:
+  it clears and re-prints the same status table every couple of seconds, with a
+  freshness header that's honest about what's live (ACTIVITY/HB-AGE, straight
+  from the heartbeat files) versus what's only as fresh as the last engine tick
+  (lifecycle/counts). It exists precisely for when the orchestrator is busy
+  (blocked on a long synchronous subagent) so it can't get a turn to print.
+
+- **`arunner tui`** (FR-62) is the richer, **optional** sibling — a Textual app
+  that lets you **browse run-dirs → open one → drill into an individual entry's
+  record → tail that entry's `heartbeat.ndjson` / the run `journal.ndjson`**,
+  all interactively. It reuses the *exact same* table renderer as `monitor`
+  (no fork, so they can't drift) and holds the same strictly-read-only property.
+  Textual is gated behind `pip install 'arunner[tui]'`; if it's absent, `arunner
+  tui` prints a one-line install hint and points you at `monitor`. **The
+  decoupling is load-bearing:** the TUI is a viewer *on top of* the externalized
+  disk state, so its dependency never touches the stdlib-only engine.
 
 ## Stop and resume
 

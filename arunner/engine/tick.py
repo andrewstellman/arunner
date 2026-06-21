@@ -119,6 +119,45 @@ _LAUNCH_FAIL_HINT = ("no heartbeat received within launch grace - check "
 # column. Display-only abbreviation (the on-disk state is unchanged).
 _STATE_DISPLAY = {"auth_or_launch_failed": "LAUNCH-FAIL"}
 
+# instr-051 (FR-62/FR-59 display-correctness): the persisted per-entry state in
+# harness_status.json is only as fresh as the LAST tick. When the orchestrator
+# is blocked between ticks (a long synchronous subagent burst), a worker whose
+# heartbeat already says COMPLETED still shows as `claimed`, and a live worker
+# with a fresh IN_PROGRESS heartbeat shows as `claimed` with no activity -- both
+# read as "stuck". The DISPLAY layer (status table, monitor, tui) reconciles the
+# persisted state with the live heartbeat so the operator sees the freshest
+# truth. This is strictly DISPLAY-ONLY: it changes nothing on disk and does not
+# touch the engine's own reaping (FR-18 -- doneness is still the worker's
+# declared status field, reaped by _advance).
+_HB_TO_STATE = {"COMPLETED": "completed", "FAILED": "failed",
+                "ABANDONED": "abandoned"}
+# Marker appended to a state taken from the heartbeat ahead of the tick
+# ("live; awaiting reap" for a terminal, "live; running" for IN_PROGRESS).
+_LIVE_MARKER = "*"
+
+
+def _reconcile_state(persisted_state, hb_status, hb_mtime, now, fresh_secs):
+    """Reconcile a persisted per-entry state with its live heartbeat. Returns
+    ``(display_state, live)`` -- ``live`` True when the heartbeat is AHEAD of the
+    persisted state (the tick has not caught up yet). Pure: it reads nothing
+    (the caller supplies the heartbeat observation), so it stays strictly
+    read-only and is independent of the engine's reaping.
+
+      * a terminal sentinel (COMPLETED/FAILED/ABANDONED) in the heartbeat while
+        the persisted state is still in-flight -> show the terminal truth (the
+        worker finished; the tick has not reaped it yet) -- e.g. ``completed``.
+      * a FRESH (recent-mtime) IN_PROGRESS/STARTING over a ``claimed`` persisted
+        state -> show ``running`` (the worker is alive and working).
+      * otherwise -> the persisted state unchanged (``live`` False)."""
+    persisted = persisted_state or "-"
+    if hb_status in _TERMINAL_HB and persisted in _INFLIGHT_STATES:
+        return _HB_TO_STATE[hb_status], True
+    if (hb_status in ("IN_PROGRESS", "STARTING") and persisted == "claimed"
+            and hb_mtime is not None and fresh_secs is not None
+            and (now - hb_mtime) <= fresh_secs):
+        return "running", True
+    return persisted, False
+
 
 def _now() -> float:
     """Wall-clock seconds. Overridable via ARUNNER_NOW (epoch float)
@@ -2521,10 +2560,23 @@ def _format_table(run_dir, status, plan, terminal: bool) -> str:
                "HB-AGE", "TOKENS"),
     ]
     any_launch_fail = False
+    any_live = False
+    now = _now()
+    # instr-051: reconcile the persisted STATE against the live heartbeat so a
+    # finished/started worker isn't shown stale between ticks. The freshness
+    # window for "still IN_PROGRESS == running" is the stall threshold -- the
+    # same horizon the engine uses to decide a worker has gone quiet, so the
+    # display agrees with the engine's own liveness model.
+    fresh_secs = _cfg(plan, "stall_threshold_minutes",
+                      DEFAULT_STALL_THRESHOLD_MINUTES) * 60
     for name in sorted(status["runs"]):
         r = status["runs"][name]
-        hb = _run_hb_path(run_dir, name, r)          # FR-62: current step's hb
-        _, _, activity, _ = _hb_observe(hb)
+        hb = _run_hb_path(run_dir, name, r)          # FR-62: current step's hb (multi-step aware)
+        _, hb_status, activity, hb_mtime = _hb_observe(hb)
+        # Match the engine's terminal detection (_terminal_status_of scans the
+        # WHOLE tail), so a terminal sentinel followed by a trailing line still
+        # reconciles to the terminal truth -- not only when it is the last line.
+        eff_status = _terminal_status_of(hb) or hb_status
         # FR-62: a multi-step run shows "step N of M" alongside the step label.
         if r.get("step_count"):
             tag = "s%d/%d" % (int(r.get("step_index", 0)) + 1, int(r["step_count"]))
@@ -2532,15 +2584,23 @@ def _format_table(run_dir, status, plan, terminal: bool) -> str:
         st = r["state"]
         if st == "auth_or_launch_failed":
             any_launch_fail = True
+        disp, live = _reconcile_state(st, eff_status, hb_mtime, now, fresh_secs)
+        any_live = any_live or live
+        disp_label = _STATE_DISPLAY.get(disp, disp)
+        if live:
+            disp_label = disp_label + _LIVE_MARKER     # heartbeat ahead of tick
+        # LAST-HB: the LIVE heartbeat status when present (it leads the tick),
+        # else the last-tick-persisted observation.
+        last_hb = hb_status or r.get("last_hb_status") or "-"
         inp, outp = _run_tokens(run_dir, name, r)        # FR-65 TOKENS column
         rows.append(fmt % (
             name[4:],
             _ascii_trunc(r.get("target_repo") or "-", 21),
             {"subagent": "subgnt", "shell": "shell"}.get(
                 r.get("dispatch_mode"), "-"),
-            _STATE_DISPLAY.get(st, st)[:12],
+            disp_label[:12],
             _ascii_trunc(activity, 15),
-            r.get("last_hb_status") or "-",
+            last_hb,
             _hb_age_str(run_dir, name, hb),
             _tokens_cell(inp, outp),
         ))
@@ -2553,6 +2613,11 @@ def _format_table(run_dir, status, plan, terminal: bool) -> str:
             c.get("stalled", 0), c.get("completed", 0),
             c.get("failed", 0) + c.get("auth_or_launch_failed", 0)
             + c.get("abandoned", 0)))
+    if any_live:
+        # instr-051: explain the reconciliation marker inline so the table is
+        # self-describing wherever it prints (status / monitor / tui).
+        rows.append("* = live from heartbeat, ahead of the last tick "
+                    "(not yet reaped/recorded).")
     if any_launch_fail:
         # FR-21b: the diagnostic hint travels with the table, not just the
         # result record — LAUNCH-FAIL covers more than auth.

@@ -164,10 +164,23 @@ def _status_age_secs(status, status_path, now) -> float:
 def _monitor_freshness_line(run_dir, status, status_path, interval, now) -> str:
     """The monitor-OWNED honesty line printed AROUND the shared table (never
     edits `_format_table`'s body): the fast display refresh must not imply the
-    lifecycle columns are fresher than the last engine tick (NFR-12)."""
-    age = _age_str(_status_age_secs(status, status_path, now))
-    return ("monitor: refresh %.1fs | run-state as of last tick: %s ago | "
-            "ACTIVITY/HB-AGE: live (Ctrl-C to exit)" % (interval, age))
+    lifecycle columns are fresher than the last engine tick (NFR-12).
+
+    instr-051: when the last tick is much older than the cadence (> 2x the
+    persisted ``next_tick_minutes``), the orchestrator is likely blocked between
+    ticks -- make that visually obvious so the operator can always tell a stale
+    LIFECYCLE (tick-age) from live HEARTBEAT activity."""
+    age_secs = _status_age_secs(status, status_path, now)
+    age = _age_str(age_secs)
+    stale = ""
+    cadence_min = status.get("next_tick_minutes")
+    if (isinstance(cadence_min, (int, float)) and cadence_min > 0
+            and not status.get("done") and age_secs > 2 * float(cadence_min) * 60):
+        stale = (" !! STALE TICK (>2x cadence; orchestrator may be blocked "
+                 "between ticks) !!")
+    return ("monitor: refresh %.1fs | run-state as of last tick: %s ago%s | "
+            "ACTIVITY/HB-AGE: live | * = live heartbeat ahead of last tick "
+            "(Ctrl-C to exit)" % (interval, age, stale))
 
 
 def render_monitor_frame(run_dir, interval=2.0, now=None):
@@ -328,6 +341,31 @@ def cmd_monitor(args) -> int:
         sys.stdout.write("\n")
         sys.stdout.flush()
         return 0
+
+
+# --- FR-62: optional Textual TUI (`arunner tui`) ---------------------------
+# A richer, interactive sibling of `arunner monitor`: pick a run, watch it live,
+# drill into one entry, tail its heartbeat/journal stream -- all strictly
+# read-only over the externalized disk state. Textual is an OPTIONAL extra
+# (`pip install arunner[tui]`); it is imported LAZILY here so the bare install
+# stays dependency-free and the engine/ticker/monitor path never imports it.
+# `arunner monitor` remains the always-available zero-dependency fallback.
+def cmd_tui(args) -> int:
+    run_dir = Path(args.run_dir).resolve() if args.run_dir else None
+    if run_dir is not None and not (run_dir / "harness_status.json").is_file():
+        print("arunner tui: not a run-dir (no harness_status.json): %s" % run_dir,
+              file=sys.stderr)
+        return 2
+    try:
+        from arunner.tui import app as _tui_app          # lazy: needs [tui]
+    except ImportError:
+        print("arunner tui needs the optional Textual UI. Install it with:\n"
+              "    pip install 'arunner[tui]'\n"
+              "(The zero-dependency 'arunner monitor <run-dir>' is always "
+              "available as the stdlib fallback.)", file=sys.stderr)
+        return 3
+    runs_root = Path(args.runs_root).resolve() if args.runs_root else None
+    return _tui_app.run(runs_root=runs_root, run_dir=run_dir)
 
 
 def cmd_resume(args) -> int:
@@ -561,13 +599,23 @@ def _build_parser() -> argparse.ArgumentParser:
                                        "(FR-60)")
     ox.add_argument("run_dir")
     ox.add_argument("--id", default=None, help="show only this message id's ack+result")
+
+    tu = sub.add_parser("tui", help="interactive read-only TUI: pick a run, watch "
+                                    "it live, drill into an entry, tail its log "
+                                    "(FR-62; needs the optional [tui] extra)")
+    tu.add_argument("run_dir", nargs="?", default=None,
+                    help="open this run directly (skip the picker)")
+    tu.add_argument("--runs-root", default=None,
+                    help="directory of run-dirs to list in the picker "
+                         "(default: ARUNNER_RUNS_DIR or <repo>/harness_runs)")
     return p
 
 
 _DISPATCH = {"run": cmd_run, "status": cmd_status, "stop": cmd_stop,
              "resume": cmd_resume, "summary": cmd_summary, "new": cmd_new,
              "expand": cmd_expand, "preview": cmd_preview, "add": cmd_add,
-             "monitor": cmd_monitor, "msg": cmd_msg, "outbox": cmd_outbox}
+             "monitor": cmd_monitor, "msg": cmd_msg, "outbox": cmd_outbox,
+             "tui": cmd_tui}
 
 
 def main(argv=None) -> int:
