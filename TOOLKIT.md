@@ -525,3 +525,7 @@ reports them all at once) and exits nonzero — fix every one.
 > fields, the strict keys) validates as written. The `examples/`
 > templates are bound to `--check` in the test suite, so this walkthrough can't
 > silently drift from what the engine accepts.
+
+## Contributing to arunner (dev convention)
+
+arunner is developed on a **single trunk**: short-lived branches/worktrees merged into `main` as soon as the work is good (full suite green + Council SHIP), never kept as long-lived parallel feature branches — those drift and manufacture merge conflicts. A feature built on a since-stale base is re-derived small on `main` rather than force-merged. Full development conventions: `DEVELOPMENT_CONTEXT.md`.

@@ -355,6 +355,10 @@ lineage note. (See the [Quality Playbook](https://github.com/andrewstellman/qual
 PyPI/npm reservations are under that name); renamed to **arunner** — agent
 runner — at v0.1.0.*
 
+## Development
+
+arunner is developed on a **single trunk**: short-lived branches (or worktrees) are merged into `main` as soon as the work is good — full suite green + Council SHIP — and not kept as long-lived parallel feature branches (those drift from `main` and from each other and manufacture avoidable merge conflicts). A feature built on a since-stale base is re-derived small on `main` rather than force-merged. Full conventions live in [`DEVELOPMENT_CONTEXT.md`](DEVELOPMENT_CONTEXT.md).
+
 ## License
 
 Apache-2.0. No network calls of its own, no telemetry, no shell-out except

@@ -149,6 +149,7 @@ in-session autonomous loop (rung 1) dropped 4 times in one session (gaps of
 
 ## Development process
 
+- **One trunk; short-lived branches; merge early.** Develop on a short-lived branch or worktree and merge it into `main` as soon as the work is good (full suite green + Council SHIP). Do **not** keep multiple long-lived parallel feature branches: they drift from `main` and from each other, and manufacture avoidable merge conflicts (and even cross-branch FR/US **numbering collisions**). When a feature was built on a now-stale base, prefer **re-deriving it small on the current `main`** over force-merging the old-base branch. *(Born 2026-06-21: five parallel branches — `fr-61-65-spec`/`-impl`, `fr-61-subagent-liveness`, `fr-62-tui`, `fix-gate-cwd` — had to be untangled into `main` after the fact; one even reused `FR-61`/`US-17` for different features. One trunk, merge when happy.)*
 - **Verify, don't recall.** Every command/flag/field in docs and code is
   checked against the shipped source. The requirements doc is the spec; cite
   `FR/NFR/UC` numbers.
