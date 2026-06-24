@@ -2976,9 +2976,14 @@ def _format_table(run_dir, status, plan, terminal: bool) -> str:
         # else the last-tick-persisted observation.
         last_hb = hb_status or r.get("last_hb_status") or "-"
         inp, outp = _run_tokens(run_dir, name, r)        # FR-65 TOKENS column
-        out_age = _output_age_secs(run_dir, name, r,     # FR-73 OUT-AGE column
-                                   outage_entries.get(name), plan, now,
-                                   memo=outage_memo)
+        # FR-73: OUT-AGE answers "is this live worker still producing?" -- only
+        # actionable for an IN-FLIGHT run, so the bounded scan is skipped for
+        # queued (not started) and terminal (done) runs. This caps per-render
+        # cost at ~pool_size scans, not one per accumulated run, so the "never a
+        # full recursive walk per render" bound holds even at batch scale.
+        out_age = (_output_age_secs(run_dir, name, r, outage_entries.get(name),
+                                    plan, now, memo=outage_memo)
+                   if st in _INFLIGHT_STATES else None)
         rows.append(fmt % (
             name[4:],
             _ascii_trunc(r.get("target_repo") or "-", 21),
