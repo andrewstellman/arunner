@@ -294,8 +294,14 @@ class DataLayerViewModels(unittest.TestCase):
         self.assertIn("did the thing", txt)
 
     def test_format_picker_row_live_and_done(self):
-        rd = _run_dir(done=True)
-        run = DATA.list_runs(rd.parent)[0]
+        # Isolated parent so list_runs() sees ONLY this run — an unrooted
+        # _run_dir().parent is the SHARED system temp dir, where list_runs
+        # (newest-first) could return a leaked run-dir from another test and
+        # the picker row would read DEAD/whatever, not this run's DONE
+        # (the FR-75-floor flake: more run-dirs in /tmp tipped it over).
+        root = Path(tempfile.mkdtemp())
+        rd = _run_dir(done=True, root=root)
+        run = DATA.list_runs(root)[0]        # isolated -> only this run
         self.assertIn("DONE", DATA.format_picker_row(run))
 
     def test_journal_tail(self):
