@@ -2701,6 +2701,71 @@ def _dispatch_step(run_dir, name, r, entry, now, plan) -> dict:
             "dispatch_mode": "subagent", "worker_prompt": prompt}
 
 
+# FR-76: target-state done-check (idempotent resume). A plan-declared per-job
+# predicate, evaluated BEFORE dispatch, so re-running the same plan = resume
+# derived from TARGET STATE -- independent of run-dir survival. The done_check is
+# the ONE explicit, operator-declared exception to "doneness from the declared
+# status, never parsed output" (PLANNED_run_robustness §9): an operator-provided
+# predicate/gate, NOT the engine parsing worker output to infer completion.
+_DONE_CHECK_TIMEOUT_SECONDS = 30           # a done_check command is a quick probe
+_DONE_SKIP_HINT = ("done_check pre-satisfied -- target already complete; skipped "
+                   "(not re-run); resume re-derived from target state (FR-76)")
+
+
+def _done_check_of(entry):
+    """The optional FR-76 ``done_check`` predicate for a job (a dict with exactly
+    one of ``artifact`` or ``command``), or None when absent/malformed."""
+    dc = entry.get("done_check") if isinstance(entry, dict) else None
+    return dc if isinstance(dc, dict) else None
+
+
+def _done_check_satisfied(entry) -> bool:
+    """FR-76: evaluate a job's ``done_check`` against TARGET STATE, BEFORE dispatch.
+      * ``artifact``: a path/glob relative to the job's ``repo`` whose existence
+        => done (``glob.iglob(..., recursive=True)`` -- portable on the 3.10+
+        floor, matches files under a trailing ``**``).
+      * ``command``: an argv run with cwd = the job's ``repo``; **exit 0 => done**
+        -- EXIT-CODE ONLY (no stdout read), mirroring ``_eval_shell_gate`` so the
+        engine never parses worker output to infer completion.
+    Any error / unmeasurable predicate => NOT satisfied (the job is dispatched, not
+    skipped): a probe must never FALSELY skip a job (a partial target is redone)."""
+    dc = _done_check_of(entry)
+    if dc is None:
+        return False
+    root = entry.get("repo")
+    if not (isinstance(root, str) and root):
+        return False
+    art = dc.get("artifact")
+    if isinstance(art, str) and art:
+        try:
+            return any(glob.iglob(os.path.join(root, art), recursive=True))
+        except OSError:
+            return False
+    cmd = dc.get("command")
+    if isinstance(cmd, list) and cmd and all(isinstance(t, str) for t in cmd):
+        try:
+            proc = subprocess.run(cmd, stdout=subprocess.DEVNULL,
+                                  stderr=subprocess.DEVNULL,
+                                  timeout=_DONE_CHECK_TIMEOUT_SECONDS, cwd=root)
+            return proc.returncode == 0
+        except (OSError, subprocess.SubprocessError):
+            return False
+    return False
+
+
+def _synthesize_done_skip(run_dir, r) -> None:
+    """FR-76: mark a QUEUED job whose ``done_check`` is pre-satisfied as terminal
+    ``completed`` WITHOUT dispatching it -- the target is already done, so the
+    (re-)run skips it (never re-runs). Writes a synthesized COMPLETED result
+    sentinel (idempotent, via _synthesize_failure) and flips the run terminal so
+    it leaves the queue and never claims a slot. ``done_skipped`` is a display
+    marker only (SKIPPED:done); doneness still flows through the terminal status."""
+    _synthesize_failure(run_dir, r, "completed", _DONE_SKIP_HINT)
+    r["state"] = "completed"
+    r["started"] = True
+    r["done_skipped"] = True
+
+
 def _dispatch(run_dir, runs, entries, pool_size, now, plan=None) -> list[dict]:
     """Emit dispatch entries for queued runs while a pool slot is free.
     Guarded: a run already past queued is never re-dispatched.
@@ -2723,6 +2788,22 @@ def _dispatch(run_dir, runs, entries, pool_size, now, plan=None) -> list[dict]:
         if r["state"] != "queued":
             continue
         entry = entries[name]
+        # FR-76: a queued job's done_check is evaluated BEFORE claim/dispatch. If
+        # satisfied, the target is already complete -> mark it completed (skipped,
+        # not re-run) and free the consideration WITHOUT consuming a pool slot, so
+        # re-running the same plan re-derives the remainder from TARGET STATE
+        # (run-dir-independent resume). Evaluated only for QUEUED runs, so an
+        # in-flight (claimed) job is never re-checked => FR-6 no double-dispatch
+        # is preserved. The `done_checked` flag bounds eval to once per run-dir
+        # (a FRESH run-dir has no flag -> re-derives); a not-yet-satisfied target
+        # is dispatched and REDONE, never skipped.
+        if _done_check_of(entry) is not None and not r.get("done_checked"):
+            r["done_checked"] = True
+            if _done_check_satisfied(entry):
+                _synthesize_done_skip(run_dir, r)
+                _log(run_dir, "%s: done-check pre-satisfied -> completed "
+                              "(skipped, not re-run)" % name)
+                continue
         # A started multi-step run between steps already holds its slot; a fresh
         # run needs a free one. (continue, not break -- a later started run may
         # still be eligible while a fresh one is pool-gated.)
@@ -2996,6 +3077,10 @@ def _format_table(run_dir, status, plan, terminal: bool) -> str:
         out_age = (_output_age_secs(run_dir, name, r, outage_entries.get(name),
                                     plan, now, memo=outage_memo)
                    if st in _INFLIGHT_STATES else None)
+        # FR-76: a done_check-skipped target is a `completed` row carrying a clear
+        # marker so the operator sees it was resume-skipped, not freshly run.
+        if r.get("done_skipped"):
+            activity = "done-check skip"
         rows.append(fmt % (
             name[4:],
             _ascii_trunc(r.get("target_repo") or "-", 21),
@@ -3132,7 +3217,8 @@ def _arunner_version() -> str:
 # --check validator rejects any unknown job/step key (a typo like `promt`/`repoo`
 # fails here, not silently at dispatch), in lockstep with plan.schema.json.
 _COMMON_JOB_KEYS = frozenset(("id", "repo", "mode", "description", "_comment",
-                              "output_globs"))   # FR-73 per-job artifact-area scope
+                              "output_globs",     # FR-73 per-job artifact-area scope
+                              "done_check"))      # FR-76 pre-dispatch resume gate
 _ADAPTER_OPT_KEYS = frozenset(("adapter_activity_patterns", "keepalive_seconds",
                                "launch_grace_minutes", "stall_threshold_minutes"))
 _MODE_JOB_KEYS = {
@@ -3703,6 +3789,8 @@ def check_plan(plan_path, run_auth: bool = False) -> list:
     for i, e in enumerate(jobs):
         if isinstance(e, dict) and "output_globs" in e:
             problems.extend(_check_output_globs("jobs[%d]" % i, e["output_globs"]))
+        if isinstance(e, dict) and "done_check" in e:
+            problems.extend(_check_done_check("jobs[%d]" % i, e["done_check"]))
     return problems
 
 
@@ -3714,6 +3802,32 @@ def _check_output_globs(tag, g) -> list:
     if not all(isinstance(s, str) and s for s in g):
         return ["%s.output_globs: every entry must be a non-empty string" % tag]
     return []
+
+
+def _check_done_check(tag, dc) -> list:
+    """FR-76: a ``done_check`` is an object with EXACTLY ONE of ``artifact`` (a
+    non-empty path/glob string) or ``command`` (a non-empty argv of strings)."""
+    if not isinstance(dc, dict):
+        return ["%s.done_check: must be an object with exactly one of 'artifact' "
+                "or 'command' (got %r)" % (tag, dc)]
+    p = []
+    extra = sorted(k for k in dc if k not in ("artifact", "command"))
+    if extra:
+        p.append("%s.done_check: unknown key(s) %s (only 'artifact' or 'command')"
+                 % (tag, ", ".join(extra)))
+    has_art, has_cmd = "artifact" in dc, "command" in dc
+    if has_art == has_cmd:           # both present, or neither
+        p.append("%s.done_check: requires EXACTLY ONE of 'artifact' or 'command'"
+                 % tag)
+        return p
+    if has_art and not (isinstance(dc["artifact"], str) and dc["artifact"]):
+        p.append("%s.done_check.artifact: must be a non-empty string (a path/glob "
+                 "relative to the job's repo)" % tag)
+    if has_cmd and not (isinstance(dc["command"], list) and dc["command"]
+                        and all(isinstance(t, str) for t in dc["command"])):
+        p.append("%s.done_check.command: must be a non-empty array of strings (an "
+                 "argv run in the job's repo; exit 0 => done)" % tag)
+    return p
 
 
 def _format_check_report(plan_path, problems) -> str:

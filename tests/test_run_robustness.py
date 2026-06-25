@@ -467,6 +467,143 @@ class OutAgeDisplay(_Base):
 # --check validation for the new knobs
 # --------------------------------------------------------------------------
 
+# --------------------------------------------------------------------------
+# FR-76 — target-state done-check + idempotent resume (run-dir-independent)
+# --------------------------------------------------------------------------
+
+class DoneCheckResume(_Base):
+    """The gen-007 stop/restart acceptance: re-running the same plan = resume
+    derived from TARGET STATE (done_check), independent of run-dir survival —
+    skip the done, dispatch the remainder, redo a partial target."""
+
+    def _done_job(self, tid, repo, artifact=None, command=None):
+        j = {"id": tid, "repo": str(repo), "mode": "agent",
+             "prompt": "do the work on this repository"}
+        dc = {}
+        if artifact is not None:
+            dc["artifact"] = artifact
+        if command is not None:
+            dc["command"] = command
+        j["done_check"] = dc
+        return j
+
+    def test_stop_restart_skips_done_dispatches_remainder(self):
+        # THE load-bearing pin — model 33/58 -> resume the 25: N targets, K
+        # already satisfy done_check (their artifact exists from the prior run).
+        # A (re-)run dispatches ONLY the N-K remainder; the K done are NOT
+        # re-dispatched; the remainder is not lost.
+        # MUTATION (instr 009): delete the pre-dispatch done_check eval block in
+        # _dispatch -> all N dispatch (nothing skipped) -> this test FAILs. Bite.
+        N, K = 8, 3
+        jobs = []
+        for i in range(N):
+            repo = self._repo("t-%02d" % i)
+            if i < K:
+                (repo / "DONE.flag").write_text("done")        # already complete
+            jobs.append(self._done_job("job-%02d" % i, repo, artifact="DONE.flag"))
+        rd = self._init(self._plan(jobs, pool_size=N))         # room for all remainder
+        os.environ["ARUNNER_NOW"] = str(M)
+        T.tick(rd)
+        s = _status(rd)
+        skipped = [n for n, r in s["runs"].items()
+                   if r["state"] == "completed" and r.get("done_skipped")]
+        dispatched = [n for n, r in s["runs"].items()
+                      if r["state"] in ("claimed", "running")]
+        self.assertEqual(len(skipped), K)                      # the K done -> skipped
+        self.assertEqual(len(dispatched), N - K)               # only remainder dispatched
+        # the K done targets carry a synthesized COMPLETED sentinel and were never
+        # dispatched (no subagent dispatch_mode recorded).
+        for run in ("run-01", "run-02", "run-03"):             # job-00..02 (i<K)
+            self.assertTrue(s["runs"][run].get("done_skipped"))
+            self.assertIsNone(s["runs"][run].get("dispatch_mode"))
+        rec = json.loads((rd / "results" / "result-00001.json").read_text())
+        self.assertEqual(rec["terminal_status"], "COMPLETED")
+        self.assertTrue(rec.get("synthesized"))
+        self.assertIn("done_check", rec.get("summary", ""))
+
+    def test_partial_target_not_satisfied_is_redone_not_skipped(self):
+        # A target whose done_check is NOT satisfied is dispatched (redone), never
+        # skipped. MUTATION (instr 009): invert the guard to skip-on-unsatisfied
+        # -> this target is wrongly skipped -> FAIL. Bite.
+        repo = self._repo("p-1")                               # no DONE.flag
+        job = self._done_job("job-1", repo, artifact="DONE.flag")
+        rd = self._init(self._plan([job], pool_size=1))
+        os.environ["ARUNNER_NOW"] = str(M)
+        T.tick(rd)
+        r = _status(rd)["runs"]["run-01"]
+        self.assertEqual(r["state"], "claimed")                # dispatched, redone
+        self.assertFalse(r.get("done_skipped"))
+
+    def test_done_check_command_exit0_skips_nonzero_dispatches(self):
+        # The check-command shape: exit 0 => done (skip); non-zero => dispatch.
+        done = self._repo("c-1")
+        rd = self._init(self._plan(
+            [self._done_job("job-1", done, command=["true"])], pool_size=1))
+        os.environ["ARUNNER_NOW"] = str(M)
+        T.tick(rd)
+        self.assertTrue(_status(rd)["runs"]["run-01"].get("done_skipped"))
+
+        todo = self._repo("c-2")
+        os.environ["ARUNNER_RUNS_DIR"] = str(self.tmp / "runs2")   # distinct run-dir
+        rd2 = self._init(self._plan(
+            [self._done_job("job-1", todo, command=["false"])], pool_size=1))
+        T.tick(rd2)
+        self.assertEqual(_status(rd2)["runs"]["run-01"]["state"], "claimed")
+
+    def test_artifact_glob_shape_matches_file(self):
+        # The artifact predicate is a path/glob (a trailing ** matches files on
+        # the 3.10+ floor — same portable glob as FR-73).
+        repo = self._repo("g-1")
+        (repo / "out").mkdir()
+        (repo / "out" / "report.json").write_text("{}")
+        rd = self._init(self._plan(
+            [self._done_job("job-1", repo, artifact="out/**")], pool_size=1))
+        os.environ["ARUNNER_NOW"] = str(M)
+        T.tick(rd)
+        self.assertTrue(_status(rd)["runs"]["run-01"].get("done_skipped"))
+
+    def test_resume_from_fresh_run_dir_skips_done(self):
+        # Run-dir independence: the SAME plan re-init'd into a FRESH run-dir
+        # consults done_check on entry and skips the satisfied target — WITHOUT
+        # the original run-dir (a lost/rotated run-dir resumes identically).
+        done = self._repo("d-1"); (done / "DONE.flag").write_text("x")
+        todo = self._repo("d-2")
+        jobs = [self._done_job("job-1", done, artifact="DONE.flag"),
+                self._done_job("job-2", todo, artifact="DONE.flag")]
+        rd1 = self._init(self._plan(jobs, pool_size=2))        # first run-dir
+        os.environ["ARUNNER_NOW"] = str(M)
+        T.tick(rd1)
+        # rd1 is now "lost": re-init the same plan into a brand-new run-dir
+        # (distinct ARUNNER_RUNS_DIR so the wall-clock-stamped dir never collides).
+        os.environ["ARUNNER_RUNS_DIR"] = str(self.tmp / "runs2")
+        rd2 = self._init(self._plan(jobs, pool_size=2))
+        self.assertNotEqual(rd1, rd2)
+        T.tick(rd2)
+        s = _status(rd2)
+        self.assertTrue(s["runs"]["run-01"].get("done_skipped"))   # resume-skipped
+        self.assertEqual(s["runs"]["run-02"]["state"], "claimed")  # remainder dispatched
+
+    def test_inflight_job_with_done_check_not_double_dispatched(self):
+        # FR-6 compose: only QUEUED runs are done-checked, so a claimed (in-flight)
+        # job is never re-evaluated — even if its artifact appears mid-flight, it
+        # is NOT flipped to done_skipped or re-dispatched; doneness stays the
+        # worker's own terminal.
+        repo = self._repo("f-1")                               # no DONE.flag yet
+        job = self._done_job("job-1", repo, artifact="DONE.flag")
+        rd = self._init(self._plan([job], pool_size=1))
+        os.environ["ARUNNER_NOW"] = str(M)
+        T.tick(rd)
+        self.assertEqual(_status(rd)["runs"]["run-01"]["state"], "claimed")
+        # the worker produces the artifact AND stays alive (fresh heartbeat)
+        (repo / "DONE.flag").write_text("x")
+        _set_hb(rd, "run-01", M + 1 * MIN)
+        os.environ["ARUNNER_NOW"] = str(M + 2 * MIN)
+        T.tick(rd)
+        r = _status(rd)["runs"]["run-01"]
+        self.assertIn(r["state"], ("claimed", "running"))
+        self.assertFalse(r.get("done_skipped"))
+
+
 class CheckValidation(_Base):
     def _check(self, plan):
         pf = self.tmp / "p.json"
@@ -504,9 +641,41 @@ class CheckValidation(_Base):
     def test_clean_plan_with_all_new_knobs(self):
         job = self._agent_job("t-1", "/tmp")
         job["output_globs"] = ["out/**"]
+        job["done_check"] = {"artifact": "DONE.flag"}
         self.assertEqual(self._check(self._plan(
             [job], stall_reclaim_minutes=120, stall_retries=1,
             output_globs=["quality/**"])), [])
+
+    def test_done_check_requires_exactly_one_shape(self):
+        job = self._agent_job("t-1", "/tmp")
+        # neither artifact nor command
+        job["done_check"] = {}
+        self.assertTrue(any("done_check" in p for p in
+                            self._check(self._plan([dict(job)]))))
+        # both at once
+        job["done_check"] = {"artifact": "x", "command": ["true"]}
+        self.assertTrue(any("done_check" in p for p in
+                            self._check(self._plan([dict(job)]))))
+        # each single shape is clean
+        job["done_check"] = {"artifact": "DONE.flag"}
+        self.assertEqual(self._check(self._plan([dict(job)])), [])
+        job["done_check"] = {"command": ["test", "-f", "DONE.flag"]}
+        self.assertEqual(self._check(self._plan([dict(job)])), [])
+
+    def test_done_check_bad_member_shapes(self):
+        job = self._agent_job("t-1", "/tmp")
+        job["done_check"] = {"artifact": ""}                   # empty string
+        self.assertTrue(any("artifact" in p for p in
+                            self._check(self._plan([dict(job)]))))
+        job["done_check"] = {"command": []}                    # empty argv
+        self.assertTrue(any("command" in p for p in
+                            self._check(self._plan([dict(job)]))))
+        job["done_check"] = {"command": [1, 2]}                # non-string argv
+        self.assertTrue(any("command" in p for p in
+                            self._check(self._plan([dict(job)]))))
+        job["done_check"] = {"nope": 1}                        # unknown key
+        self.assertTrue(any("done_check" in p for p in
+                            self._check(self._plan([dict(job)]))))
 
 
 if __name__ == "__main__":

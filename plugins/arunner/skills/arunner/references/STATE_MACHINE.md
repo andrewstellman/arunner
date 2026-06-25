@@ -40,6 +40,7 @@ harness_runs/<stamp>/
 ## Transitions (applied each non-STOP tick, all idempotent)
 
 ```
+queued ──[done_check pre-satisfied]──▶ completed   (skipped — not re-run; FR-76)
 queued ──[free pool slot]──▶ claimed ──[heartbeat STARTING/IN_PROGRESS]──▶ running
    ▲                            │                                            │
    │                            │ [no heartbeat, claimed_age > launch_grace] │ [terminal sentinel
@@ -56,8 +57,25 @@ running/claimed ──[heartbeat mtime > stall_threshold]──▶ stalled ─�
 
 The `stalled ↔ running` reversibility holds **below** the reclaim threshold; the
 `stalled → abandoned` edge is one-way (terminal). A stalled run whose OUTPUT is
-FRESH is held, never reclaimed (the alive-but-quiet guard).
+FRESH is held, never reclaimed (the alive-but-quiet guard). The
+`queued → completed` done-check edge is evaluated **before** the pool-slot
+dispatch, so a target already done never claims a slot (FR-76).
 
+- **Done-check skip (queued → completed, FR-76):** BEFORE the pool-slot
+  dispatch, a queued job's optional `done_check` is evaluated against TARGET
+  STATE — an **artifact-exists** predicate (a path/glob relative to the job's
+  repo; existence ⇒ done) or a **check command** (argv run with cwd = the job's
+  repo; **exit 0 ⇒ done**, exit-code only). If satisfied, the run is marked
+  terminal `completed` (skipped, not re-run; `SKIPPED:done` marker) via the
+  idempotent synthesized-result path and never claims a slot. So **re-running the
+  same plan = resume, derived from target state** — skip the done, dispatch the
+  remainder — independent of run-dir survival. Only `queued` runs are gated
+  (an in-flight job is never re-checked → FR-6 no double-dispatch); a target
+  written only PARTWAY (not satisfied) is REDONE, not skipped; an unmeasurable
+  predicate conservatively does NOT skip. `done_check` is the ONE operator-declared
+  exception to doneness-from-status (it is a declared predicate, not output
+  parsing). Evaluated once per run-dir (a fresh run-dir re-derives); extends the
+  FR-41 sentinel from in-run doneness to a pre-dispatch gate.
 - **Dispatch (queued → claimed):** while the count of in-flight runs
   (claimed + running + stalled) is below `pool_size`, the lowest-numbered
   queued run is emitted as a `dispatch_list` entry (its `worker_prompt`
