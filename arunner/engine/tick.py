@@ -90,6 +90,29 @@ DEFAULT_STALL_RECLAIM_MINUTES = 90
 # worker would race a re-dispatch on the same heartbeat file. The field is
 # accepted + validated now so FR-75 can consume it without a schema change.
 DEFAULT_STALL_RETRIES = 0
+# FR-75: per-job retry budget. `max_attempts` is the TOTAL number of dispatch
+# attempts a job gets (including the first); default 1 = NO retry = the pre-FR-75
+# behavior (a single failure is terminal). A job that reaches a RETRYABLE
+# terminal -- `failed` (a worker FAILED/ABANDONED sentinel, or a dead shell PID)
+# or a FR-74 stall-reclaim (`abandoned`) -- is REQUEUED for another attempt while
+# its recorded attempt count is < max_attempts, becoming dispatch-eligible only
+# after `retry_backoff_seconds` (clock via the ARUNNER_NOW seam, no real sleeps).
+# AUTH_OR_LAUNCH_FAILED is deliberately NOT retried (the transient-vs-fatal
+# default: an auth/launch/pre-flight failure won't succeed on a blind re-run, so
+# it never burns attempts). This LANDS the `stall_retries` seam FR-74 reserved:
+# `max_attempts` is the UNIFIED budget for both retryable terminals, and
+# `stall_retries` is SUPERSEDED -- still accepted at --check for back-compat but
+# no longer read by the engine (it never had runtime effect: FR-74 always
+# abandoned at the default 0, so nothing regresses). Resume-not-restart: a retry
+# keeps the worker's OUTPUT (target repo) and re-derives FR-76's done_check, so a
+# retry whose target is now satisfied is SKIPPED (no wasted attempt). Composes
+# with FR-6 (a requeued job is `queued`, dispatched once per attempt -- the
+# claim-lock holds, never double-dispatched). The attempt count persists in the
+# run record (crash-safe across a tick). SCOPE: single-prompt jobs; a multi-step
+# job's job-level retry (resume-vs-restart-from-step semantics) is a documented
+# follow-up -- a multistep run is never requeued.
+DEFAULT_MAX_ATTEMPTS = 1
+DEFAULT_RETRY_BACKOFF_SECONDS = 0
 DEFAULT_IDLE_TICK_MULTIPLIER = 1          # >1 lengthens cadence when nothing is running
 DEFAULT_KEEPALIVE_SECONDS = 45            # FR-58a: activity-refresh cadence (adapter keepalive)
 
@@ -1896,6 +1919,94 @@ def _reclaim_stalled(run_dir, name, r, reason=_STALL_RECLAIM_HINT):
          % name)
 
 
+# --- FR-75: per-job retry policy (max_attempts + backoff) -------------------
+
+def _retry_policy(entry):
+    """The (max_attempts, retry_backoff_seconds) for a job. Defaults (1, 0) =
+    no retry. A bad value falls back to the default (defended at --check)."""
+    ma = entry.get("max_attempts") if isinstance(entry, dict) else None
+    max_attempts = (ma if isinstance(ma, int) and not isinstance(ma, bool)
+                    and ma >= 1 else DEFAULT_MAX_ATTEMPTS)
+    rb = entry.get("retry_backoff_seconds") if isinstance(entry, dict) else None
+    backoff = (rb if isinstance(rb, (int, float)) and not isinstance(rb, bool)
+               and rb >= 0 else DEFAULT_RETRY_BACKOFF_SECONDS)
+    return max_attempts, backoff
+
+
+def _requeue_for_retry(run_dir, name, r, entry, now, backoff_secs) -> None:
+    """FR-75: reset a retryable-terminal run back to ``queued`` for another
+    attempt. Removes the just-written result sentinel + any claimed leftovers,
+    RESTORES the ``queue/`` claim token (so the next dispatch re-claims and writes
+    a fresh lock -- mirroring scaffold), and ROTATES (clears) the heartbeat so the
+    next attempt starts clean -- a stale terminal line would otherwise re-reap the
+    new attempt instantly (heartbeat isolation for the retry). Resume-not-restart:
+    the worker's OUTPUT (target repo) is untouched, and ``done_checked`` is cleared
+    so a now-satisfied FR-76 done_check skips the retry (no wasted attempt). The
+    attempt count was already incremented at dispatch; this only resets
+    per-attempt state and arms the backoff gate (``retry_not_before``)."""
+    job_id = r["job_id"]
+    # 1. drop the prior attempt's terminal sentinel so the next attempt is reapable
+    result_path = run_dir / "results" / (job_id.replace("job-", "result-") + ".json")
+    if result_path.exists():
+        try:
+            result_path.unlink()
+        except OSError:
+            pass
+    # 2. clear any claimed leftovers (already removed by the synthesis path; defensive)
+    for suffix in (".json", ".lock"):
+        p = run_dir / "claimed" / (job_id + suffix)
+        if p.exists():
+            try:
+                p.unlink()
+            except OSError:
+                pass
+    # 3. restore the queue/ claim token (consumed when the prior attempt was
+    #    claimed) so the re-dispatch re-claims it (queue/ -> claimed/ + .lock),
+    #    keeping disk-truth consistent with a fresh queued run.
+    try:
+        _write_json(run_dir / "queue" / (job_id + ".json"),
+                    {"job_id": job_id, "run": name, "entry": entry})
+    except OSError:
+        pass
+    # 4. rotate the heartbeat (engine liveness bookkeeping, NOT the worker's
+    #    checkpoint -- the checkpoint is the OUTPUT in the repo + FR-76 done_check)
+    hb = _heartbeat_path(run_dir, name)
+    try:
+        if hb.exists():
+            hb.write_text("", encoding="utf-8")
+    except OSError:
+        pass
+    r["state"] = "queued"
+    r["claimed_at"] = None
+    r.pop("started", None)              # a retry re-acquires a fresh pool slot
+    r["last_hb_status"] = None
+    r.pop("launch_advisory", None)
+    r.pop("done_checked", None)         # FR-76 compose: re-derive done_check on retry
+    r["retry_not_before"] = now + backoff_secs
+
+
+def _maybe_retry(run_dir, name, r, entry, now, plan=None) -> bool:
+    """FR-75: if this job's recorded attempt count is below its ``max_attempts``,
+    requeue it for another attempt (resume-not-restart) and return True; the
+    caller then SKIPS the terminal transition. Returns False (leave terminal)
+    when the budget is exhausted, when the job declares no retry (default
+    max_attempts 1), or for a multi-step job (job-level retry of a step sequence
+    is out of scope -- never requeued). Used at every retryable-terminal site:
+    the FAILED/ABANDONED reap, the dead-shell-PID failure, and the FR-74
+    stall-reclaim."""
+    if _is_multistep(entry):
+        return False
+    max_attempts, backoff = _retry_policy(entry)
+    attempts = int(r.get("attempts") or 0)
+    if attempts >= max_attempts:
+        return False
+    _requeue_for_retry(run_dir, name, r, entry, now, backoff)
+    _log(run_dir, "%s: RETRY requeue (attempt %d/%d failed -> queued; eligible "
+                  "after %gs backoff) (FR-75)" % (name, attempts, max_attempts,
+                                                  backoff))
+    return True
+
+
 def _advance(run_dir, runs, now, stall_secs, grace_secs, suppress_stall=False,
              entries=None, plan=None):
     """Reap terminals, detect stalls and launch failures. Mutates run
@@ -1936,7 +2047,14 @@ def _advance(run_dir, runs, now, stall_secs, grace_secs, suppress_stall=False,
         terminal = _terminal_status_of(hb)
         if terminal is not None:
             if _move_to_results(run_dir, r, terminal, hb):
-                r["state"] = "failed" if terminal in ("FAILED", "ABANDONED") else "completed"
+                final = "failed" if terminal in ("FAILED", "ABANDONED") else "completed"
+                # FR-75: a FAILED/ABANDONED reap is a RETRYABLE terminal -- requeue
+                # for another attempt while under max_attempts (a COMPLETED reap is
+                # never retried). The reap already wrote the sentinel; _maybe_retry
+                # cleans it up and rotates the heartbeat before re-queueing.
+                if final == "failed" and _maybe_retry(run_dir, name, r, entry, now, plan):
+                    continue
+                r["state"] = final
                 _log(run_dir, f"{name}: reaped → {r['state']} ({terminal})")
             continue
         # 1b. shell dispatch with a recorded-but-dead PID and no terminal
@@ -1950,6 +2068,11 @@ def _advance(run_dir, runs, now, stall_secs, grace_secs, suppress_stall=False,
             _synthesize_failure(run_dir, r, "failed",
                                 f"shell worker process {pid} exited without a "
                                 f"terminal heartbeat")
+            # FR-75: a crashed shell worker (the gen-007 "child runner exited 1"
+            # transient abort) is the canonical retryable failure -- requeue while
+            # under max_attempts.
+            if _maybe_retry(run_dir, name, r, entry, now, plan):
+                continue
             r["state"] = "failed"
             _log(run_dir, f"{name}: FAILED (dead shell PID {pid}, no terminal)")
             continue
@@ -2023,7 +2146,15 @@ def _advance(run_dir, runs, now, stall_secs, grace_secs, suppress_stall=False,
                 out_age = _output_age_secs(run_dir, name, r, entry, plan, now)
                 out_stale = out_age is not None and out_age > stall_secs
                 if (now - mtime) > reclaim_secs and out_stale:
-                    _reclaim_stalled(run_dir, name, r)
+                    # FR-75: a stall-reclaimed job is subject to the retry policy
+                    # (this LANDS the stall_retries seam) -- requeue for another
+                    # attempt while under max_attempts; the requeue frees the slot
+                    # too (queued holds none), so the batch still continues. Only
+                    # an EXHAUSTED budget falls through to terminal `abandoned`
+                    # (FR-74) -- a reclaimed job ends `abandoned`, not `failed`,
+                    # keeping FR-74's honest "gave up waiting, no failure observed".
+                    if not _maybe_retry(run_dir, name, r, entry, now, plan):
+                        _reclaim_stalled(run_dir, name, r)
                     continue
                 if r["state"] != "stalled":
                     r["state"] = "stalled"
@@ -2798,6 +2929,14 @@ def _dispatch(run_dir, runs, entries, pool_size, now, plan=None) -> list[dict]:
         if r["state"] != "queued":
             continue
         entry = entries[name]
+        # FR-75: a job requeued for retry is not dispatch-eligible until its
+        # backoff window elapses (retry_not_before, on the ARUNNER_NOW clock). It
+        # stays `queued` (holding no slot) so OTHER queued jobs still dispatch; it
+        # is reconsidered each tick. Checked BEFORE the done_check so a backed-off
+        # retry isn't probed early either.
+        rnb = r.get("retry_not_before")
+        if rnb is not None and now < rnb:
+            continue
         # FR-76: a queued job's done_check is evaluated BEFORE claim/dispatch. If
         # satisfied, the target is already complete -> mark it completed (skipped,
         # not re-run) and free the consideration WITHOUT consuming a pool slot, so
@@ -2852,6 +2991,11 @@ def _dispatch(run_dir, runs, entries, pool_size, now, plan=None) -> list[dict]:
         r["claimed_at"] = now
         r["dispatch_mode"] = mode
         r["started"] = True
+        # FR-75: count this dispatch as one attempt (the FIRST dispatch -> 1).
+        # The retry policy requeues a retryable terminal while attempts <
+        # max_attempts; persisted in the run record (crash-safe across a tick).
+        r["attempts"] = int(r.get("attempts") or 0) + 1
+        r.pop("retry_not_before", None)   # backoff consumed -- this attempt is live
         inflight += 1
         # FR-61: apply the designated {var} pass BEFORE the reserved placeholders.
         raw = _apply_vars(entry.get("prompt", ""), _entry_vars(plan, entry))
@@ -3228,7 +3372,9 @@ def _arunner_version() -> str:
 # fails here, not silently at dispatch), in lockstep with plan.schema.json.
 _COMMON_JOB_KEYS = frozenset(("id", "repo", "mode", "description", "_comment",
                               "output_globs",     # FR-73 per-job artifact-area scope
-                              "done_check"))      # FR-76 pre-dispatch resume gate
+                              "done_check",        # FR-76 pre-dispatch resume gate
+                              "max_attempts",      # FR-75 per-job retry budget
+                              "retry_backoff_seconds"))  # FR-75 requeue delay
 _ADAPTER_OPT_KEYS = frozenset(("adapter_activity_patterns", "keepalive_seconds",
                                "launch_grace_minutes", "stall_threshold_minutes"))
 _MODE_JOB_KEYS = {
@@ -3784,9 +3930,11 @@ def check_plan(plan_path, run_auth: bool = False) -> list:
                 "plan.stall_reclaim_minutes: %d must be < subagent_hard_cap_minutes "
                 "%d -- the mid-run reclaim must fire BEFORE the launch hard cap "
                 "(FR-74/FR-72)" % (reclaim, plan_cap))
-    # FR-74: stall_retries is a NON-NEGATIVE int (0 = abandon-on-reclaim, the
-    # default; >0 is reserved for the FR-75 retry policy). Validated here because
-    # _PLAN_INT_KEYS requires >= 1 and 0 is the meaningful default.
+    # FR-74/FR-75: stall_retries is a NON-NEGATIVE int (default 0). It is now
+    # SUPERSEDED by FR-75's per-job `max_attempts` (the unified retry budget for
+    # both `failed` and stall-reclaimed `abandoned` terminals) and is no longer
+    # read by the engine; still accepted + validated here for plan back-compat (it
+    # never had runtime effect -- FR-74 always abandoned -- so nothing regresses).
     if "stall_retries" in plan and not (
             isinstance(plan["stall_retries"], int)
             and not isinstance(plan["stall_retries"], bool)
@@ -3801,6 +3949,17 @@ def check_plan(plan_path, run_auth: bool = False) -> list:
             problems.extend(_check_output_globs("jobs[%d]" % i, e["output_globs"]))
         if isinstance(e, dict) and "done_check" in e:
             problems.extend(_check_done_check("jobs[%d]" % i, e["done_check"]))
+        # FR-75: max_attempts is an integer >= 1 (default 1 = no retry);
+        # retry_backoff_seconds is a number >= 0 (default 0). Validated here
+        # (not via _PLAN_INT_KEYS) because they are PER-JOB and backoff allows 0.
+        if isinstance(e, dict) and "max_attempts" in e and not _is_pos_int(e["max_attempts"]):
+            problems.append("jobs[%d].max_attempts: must be an integer >= 1 "
+                            "(default 1 = no retry) (got %r)" % (i, e["max_attempts"]))
+        if isinstance(e, dict) and "retry_backoff_seconds" in e:
+            rb = e["retry_backoff_seconds"]
+            if isinstance(rb, bool) or not isinstance(rb, (int, float)) or rb < 0:
+                problems.append("jobs[%d].retry_backoff_seconds: must be a number "
+                                ">= 0 (got %r)" % (i, rb))
     return problems
 
 

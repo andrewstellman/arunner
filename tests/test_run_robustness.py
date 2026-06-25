@@ -608,6 +608,181 @@ class DoneCheckResume(_Base):
         self.assertFalse(r.get("done_skipped"))
 
 
+# --------------------------------------------------------------------------
+# FR-75 — per-job retry policy (max_attempts + backoff), landing the
+# stall_retries seam. The gen-007 ~20% transient-abort rate ("child runner
+# exited 1") needed manual wrapper re-runs; FR-75 auto-heals it in-engine.
+# Time/clock via the ARUNNER_NOW seam — no real sleeps.
+# --------------------------------------------------------------------------
+
+class RetryPolicy(_Base):
+    """A retryable terminal (`failed`, or a FR-74 stall-reclaim `abandoned`) is
+    REQUEUED up to `max_attempts`, then goes terminal. Resume-not-restart;
+    composes with FR-6 (no double-dispatch) and FR-76 (a now-done retry is
+    skipped). max_attempts default 1 = the pre-FR-75 behavior."""
+
+    def _retry_job(self, tid, repo, max_attempts=2, backoff=None, **extra):
+        j = {"id": tid, "repo": str(repo), "mode": "agent",
+             "prompt": "do the work on this repository",
+             "max_attempts": max_attempts}
+        if backoff is not None:
+            j["retry_backoff_seconds"] = backoff
+        j.update(extra)
+        return j
+
+    def test_retry_then_succeed(self):
+        # THE PIN — a stub that FAILS attempt 1 with max_attempts:2 is requeued +
+        # dispatched again, and succeeds on attempt 2 -> completed.
+        # MUTATION: make _maybe_retry always return False (remove the requeue) ->
+        # the run stays `failed` after attempt 1 -> this test FAILs. Bite.
+        repo = self._repo("r-1")
+        rd = self._init(self._plan([self._retry_job("t-1", repo)], pool_size=1))
+        os.environ["ARUNNER_NOW"] = str(M)
+        T.tick(rd)                                   # attempt 1 dispatched
+        self.assertEqual(_status(rd)["runs"]["run-01"]["attempts"], 1)
+        _append_hb(rd, "run-01", "FAILED")           # attempt 1 fails
+        T.tick(rd)                                   # reap FAILED -> requeue + redispatch
+        s = _status(rd)["runs"]["run-01"]
+        self.assertIn(s["state"], ("claimed", "running"))   # attempt 2 in flight
+        self.assertEqual(s["attempts"], 2)
+        _append_hb(rd, "run-01", "COMPLETED")        # attempt 2 succeeds
+        T.tick(rd)                                   # reap COMPLETED
+        f = _status(rd)["runs"]["run-01"]
+        self.assertEqual(f["state"], "completed")
+        self.assertEqual(f["attempts"], 2)           # exactly two attempts, no more
+
+    def test_cap_honored_terminal_failed_after_max_attempts(self):
+        # max_attempts:2 with an always-failing job -> exactly 2 attempts then
+        # terminal `failed` (never infinite).
+        # MUTATION: off-by-one (`attempts > max_attempts`) or no-cap (always
+        # requeue) -> attempts climbs past 2 / never terminal -> FAIL. Bite.
+        repo = self._repo("r-1")
+        rd = self._init(self._plan([self._retry_job("t-1", repo, max_attempts=2)],
+                                   pool_size=1))
+        os.environ["ARUNNER_NOW"] = str(M)
+        T.tick(rd)                                   # attempt 1
+        for _ in range(5):                           # bounded; a no-cap bug never breaks
+            r = _status(rd)["runs"]["run-01"]
+            if r["state"] in T._TERMINAL_STATES:
+                break
+            _append_hb(rd, "run-01", "FAILED")
+            T.tick(rd)
+        f = _status(rd)["runs"]["run-01"]
+        self.assertEqual(f["state"], "failed")       # terminal after the cap
+        self.assertEqual(f["attempts"], 2)           # exactly max_attempts, not more
+
+    def test_no_double_dispatch_on_requeue(self):
+        # FR-6 compose: a requeued job is dispatched ONCE per attempt, never
+        # concurrently — exactly one dispatch entry + one claim lock per attempt.
+        repo = self._repo("r-1")
+        rd = self._init(self._plan([self._retry_job("t-1", repo)], pool_size=1))
+        os.environ["ARUNNER_NOW"] = str(M)
+        d1 = T.tick(rd)["dispatch_list"]
+        self.assertEqual([d["run"] for d in d1], ["run-01"])   # one dispatch
+        _append_hb(rd, "run-01", "FAILED")
+        d2 = T.tick(rd)["dispatch_list"]             # requeue + redispatch this tick
+        self.assertEqual([d["run"] for d in d2], ["run-01"])   # exactly one, not two
+        locks = list((rd / "claimed").glob("job-00001.lock"))
+        self.assertEqual(len(locks), 1)             # a single live claim, no double-claim
+        self.assertEqual(_status(rd)["runs"]["run-01"]["attempts"], 2)
+
+    def test_retry_skipped_when_done_check_now_satisfied(self):
+        # Resume-not-restart + FR-76 compose: a retry whose done_check is now
+        # satisfied is SKIPPED — no wasted attempt.
+        # MUTATION: don't clear done_checked on requeue -> the retry re-dispatches
+        # (attempts==2) instead of skipping -> FAIL. Bite.
+        repo = self._repo("r-1")                     # no DONE.flag yet
+        job = self._retry_job("t-1", repo, done_check={"artifact": "DONE.flag"})
+        rd = self._init(self._plan([job], pool_size=1))
+        os.environ["ARUNNER_NOW"] = str(M)
+        T.tick(rd)                                   # attempt 1 dispatched (not done)
+        self.assertEqual(_status(rd)["runs"]["run-01"]["attempts"], 1)
+        (repo / "DONE.flag").write_text("done")      # target completes despite the fail
+        _append_hb(rd, "run-01", "FAILED")
+        T.tick(rd)                                   # reap FAILED -> requeue -> done-skip
+        f = _status(rd)["runs"]["run-01"]
+        self.assertEqual(f["state"], "completed")
+        self.assertTrue(f.get("done_skipped"))       # skipped via done_check
+        self.assertEqual(f["attempts"], 1)           # NO second attempt burned
+
+    def test_max_attempts_1_is_no_retry_backcompat(self):
+        # max_attempts:1 (and absent) = a single failure is terminal (unchanged).
+        for ma in (1, None):
+            repo = self._repo("r-%s" % ma)
+            job = {"id": "t", "repo": str(repo), "mode": "agent",
+                   "prompt": "do the work"}
+            if ma is not None:
+                job["max_attempts"] = ma
+            os.environ["ARUNNER_RUNS_DIR"] = str(self.tmp / ("runs-%s" % ma))
+            rd = self._init(self._plan([job], pool_size=1))
+            os.environ["ARUNNER_NOW"] = str(M)
+            T.tick(rd)
+            _append_hb(rd, "run-01", "FAILED")
+            T.tick(rd)
+            f = _status(rd)["runs"]["run-01"]
+            self.assertEqual(f["state"], "failed")   # terminal — no requeue
+            self.assertEqual(f["attempts"], 1)
+
+    def test_stall_reclaimed_job_is_requeued_when_under_cap(self):
+        # The stall_retries seam now LIVE: an FR-74-reclaimed (stalled, output-
+        # stale) job with max_attempts>1 is REQUEUED, not abandoned.
+        # MUTATION: don't wire _maybe_retry into the reclaim caller -> it abandons
+        # even with max_attempts -> assertNotEqual(state,'abandoned') FAILs. Bite.
+        repo = self._repo("r-1")
+        rd = self._init(self._plan([self._retry_job("t-1", repo, max_attempts=2)],
+                                   pool_size=1))
+        os.environ["ARUNNER_NOW"] = str(M)
+        T.tick(rd)                                   # attempt 1
+        _set_hb(rd, "run-01", M)                     # heartbeat goes silent at M
+        _set_output(repo, M)                         # output also stale at M
+        os.environ["ARUNNER_NOW"] = str(M + 91 * MIN)  # past reclaim AND stale
+        T.tick(rd)                                   # reclaim -> requeue + redispatch
+        s = _status(rd)["runs"]["run-01"]
+        self.assertNotEqual(s["state"], "abandoned")  # requeued, NOT abandoned
+        self.assertEqual(s["attempts"], 2)            # second attempt consumed
+        # the prior attempt's synthesized ABANDONED sentinel was cleared on requeue
+        self.assertFalse((rd / "results" / "result-00001.json").exists())
+
+    def test_stall_reclaimed_abandoned_when_cap_exhausted(self):
+        # End-state decision: a stall-reclaimed job that EXHAUSTS its budget ends
+        # `abandoned` (FR-74's honest "gave up waiting"), not `failed`.
+        repo = self._repo("r-1")
+        rd = self._init(self._plan([self._retry_job("t-1", repo, max_attempts=1)],
+                                   pool_size=1))
+        os.environ["ARUNNER_NOW"] = str(M)
+        T.tick(rd)
+        _set_hb(rd, "run-01", M)
+        _set_output(repo, M)
+        os.environ["ARUNNER_NOW"] = str(M + 91 * MIN)
+        T.tick(rd)
+        s = _status(rd)["runs"]["run-01"]
+        self.assertEqual(s["state"], "abandoned")    # exhausted -> abandoned (not failed)
+        rec = json.loads((rd / "results" / "result-00001.json").read_text())
+        self.assertEqual(rec["terminal_status"], "ABANDONED")
+
+    def test_backoff_delays_redispatch(self):
+        # A requeued attempt is NOT dispatch-eligible until retry_backoff_seconds
+        # elapse (via ARUNNER_NOW).
+        # MUTATION: ignore retry_not_before -> the retry redispatches immediately
+        # (state claimed at tick2) -> assertEqual(state,'queued') FAILs. Bite.
+        repo = self._repo("r-1")
+        rd = self._init(self._plan(
+            [self._retry_job("t-1", repo, max_attempts=2, backoff=600)], pool_size=1))
+        os.environ["ARUNNER_NOW"] = str(M)
+        T.tick(rd)                                   # attempt 1
+        _append_hb(rd, "run-01", "FAILED")
+        os.environ["ARUNNER_NOW"] = str(M + 1 * MIN)
+        T.tick(rd)                                   # reap -> requeue; backoff not elapsed
+        s = _status(rd)["runs"]["run-01"]
+        self.assertEqual(s["state"], "queued")       # held in backoff, NOT redispatched
+        self.assertEqual(s["attempts"], 1)
+        os.environ["ARUNNER_NOW"] = str(M + 12 * MIN)  # past the 600s backoff
+        T.tick(rd)                                   # now eligible -> redispatch
+        f = _status(rd)["runs"]["run-01"]
+        self.assertIn(f["state"], ("claimed", "running"))
+        self.assertEqual(f["attempts"], 2)
+
+
 class CheckValidation(_Base):
     def _check(self, plan):
         pf = self.tmp / "p.json"
@@ -665,6 +840,39 @@ class CheckValidation(_Base):
         self.assertEqual(self._check(self._plan([dict(job)])), [])
         job["done_check"] = {"command": ["test", "-f", "DONE.flag"]}
         self.assertEqual(self._check(self._plan([dict(job)])), [])
+
+    def test_max_attempts_must_be_pos_int(self):
+        # FR-75: max_attempts is an integer >= 1 (default 1).
+        for bad in (0, -1, 1.5, True, "2"):
+            job = self._agent_job("t-1", "/tmp")
+            job["max_attempts"] = bad
+            self.assertTrue(any("max_attempts" in p for p in
+                                self._check(self._plan([job]))),
+                            "expected a max_attempts problem for %r" % (bad,))
+        job = self._agent_job("t-1", "/tmp")
+        job["max_attempts"] = 3                       # valid
+        self.assertEqual(self._check(self._plan([job])), [])
+
+    def test_retry_backoff_must_be_non_negative_number(self):
+        # FR-75: retry_backoff_seconds is a number >= 0 (default 0).
+        for bad in (-1, -0.5, True, "5"):
+            job = self._agent_job("t-1", "/tmp")
+            job["retry_backoff_seconds"] = bad
+            self.assertTrue(any("retry_backoff_seconds" in p for p in
+                                self._check(self._plan([job]))),
+                            "expected a retry_backoff_seconds problem for %r" % (bad,))
+        for ok in (0, 30, 12.5):                      # int and float both fine
+            job = self._agent_job("t-1", "/tmp")
+            job["retry_backoff_seconds"] = ok
+            job["max_attempts"] = 2
+            self.assertEqual(self._check(self._plan([job])), [])
+
+    def test_clean_plan_with_retry_knobs(self):
+        job = self._agent_job("t-1", "/tmp")
+        job["max_attempts"] = 3
+        job["retry_backoff_seconds"] = 60
+        job["done_check"] = {"artifact": "DONE.flag"}
+        self.assertEqual(self._check(self._plan([job], stall_retries=1)), [])
 
     def test_done_check_bad_member_shapes(self):
         job = self._agent_job("t-1", "/tmp")
